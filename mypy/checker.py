@@ -307,6 +307,11 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
             with self.tscope.module_scope(self.tree.fullname):
                 with self.enter_partial_types(), self.binder.top_frame_context():
                     for d in self.tree.defs:
+                        if (self.binder.is_unreachable()
+                                and self.should_report_unreachable_issues()
+                                and not self.is_raising_or_empty(d)):
+                            self.msg.unreachable_statement(d)
+                            break
                         self.accept(d)
 
                 assert not self.current_node_deferred
@@ -1104,7 +1109,17 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         bound_type = bind_self(typ, self_type, is_classmethod=True)
         # Check that __new__ (after binding cls) returns an instance
         # type (or any).
-        if not isinstance(get_proper_type(bound_type.ret_type),
+        if isinstance(fdef.info, TypeInfo) and fdef.info.is_metaclass():
+            # This is a metaclass, so it must return a new unrelated type.
+            self.check_subtype(
+                bound_type.ret_type,
+                self.type_type(),
+                fdef,
+                message_registry.INVALID_NEW_TYPE,
+                'returns',
+                'but must return a subtype of'
+            )
+        elif not isinstance(get_proper_type(bound_type.ret_type),
                           (AnyType, Instance, TupleType)):
             self.fail(
                 message_registry.NON_INSTANCE_NEW_TYPE.format(
@@ -5395,9 +5410,11 @@ def conditional_type_map(expr: Expression,
                 return None, {}
             else:
                 # we can only restrict when the type is precise, not bounded
-                proposed_precise_type = UnionType([type_range.item
-                                          for type_range in proposed_type_ranges
-                                          if not type_range.is_upper_bound])
+                proposed_precise_type = UnionType.make_union([
+                    type_range.item
+                    for type_range in proposed_type_ranges
+                    if not type_range.is_upper_bound
+                ])
                 remaining_type = restrict_subtype_away(current_type, proposed_precise_type)
                 return {expr: proposed_type}, {expr: remaining_type}
         else:
