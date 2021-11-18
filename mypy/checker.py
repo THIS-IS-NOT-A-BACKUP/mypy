@@ -1536,6 +1536,16 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
                     original_type = self.function_type(original_node)
                 elif isinstance(original_node, Decorator):
                     original_type = self.function_type(original_node.func)
+                elif isinstance(original_node, Var):
+                    # Super type can define method as an attribute.
+                    # See https://github.com/python/mypy/issues/10134
+
+                    # We also check that sometimes `original_node.type` is None.
+                    # This is the case when we use something like `__hash__ = None`.
+                    if original_node.type is not None:
+                        original_type = get_proper_type(original_node.type)
+                    else:
+                        original_type = NoneType()
                 else:
                     assert False, str(base_attr.node)
             if isinstance(original_node, (FuncDef, OverloadedFuncDef)):
@@ -3928,8 +3938,21 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         if s.target:
             target_type = get_proper_type(self.expr_checker.accept(s.target))
             if not isinstance(target_type, NoneType):
-                # TODO: Also verify the type of 'write'.
-                self.expr_checker.analyze_external_member_access('write', target_type, s.target)
+                write_type = self.expr_checker.analyze_external_member_access(
+                    'write', target_type, s.target)
+                required_type = CallableType(
+                    arg_types=[self.named_type('builtins.str')],
+                    arg_kinds=[ARG_POS],
+                    arg_names=[None],
+                    ret_type=AnyType(TypeOfAny.implementation_artifact),
+                    fallback=self.named_type('builtins.function'),
+                )
+                # This has to be hard-coded, since it is a syntax pattern, not a function call.
+                if not is_subtype(write_type, required_type):
+                    self.fail(message_registry.PYTHON2_PRINT_FILE_TYPE.format(
+                        write_type,
+                        required_type,
+                    ), s.target)
 
     def visit_break_stmt(self, s: BreakStmt) -> None:
         self.binder.handle_break()
