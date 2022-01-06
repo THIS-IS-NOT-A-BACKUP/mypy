@@ -2247,6 +2247,12 @@ class SemanticAnalyzer(NodeVisitor[None],
                 return True
             # Assignment color = Color['RED'] defines a variable, not an alias.
             return not rv.node.is_enum
+        if isinstance(rv.node, Var):
+            return rv.node.fullname in (
+                'typing.NoReturn',
+                'typing_extensions.NoReturn',
+                'mypy_extensions.NoReturn',
+            )
 
         if isinstance(rv, NameExpr):
             n = self.lookup(rv.name, rv)
@@ -2631,7 +2637,6 @@ class SemanticAnalyzer(NodeVisitor[None],
                                  self.plugin,
                                  self.options,
                                  self.is_typeshed_stub_file,
-                                 allow_new_syntax=self.is_stub_file,
                                  allow_placeholder=allow_placeholder,
                                  in_dynamic_func=dynamic,
                                  global_scope=global_scope)
@@ -4086,6 +4091,7 @@ class SemanticAnalyzer(NodeVisitor[None],
                 name = target.type.fullname
                 if (alias.no_args and  # this avoids bogus errors for already reported aliases
                         name in get_nongen_builtins(self.options.python_version) and
+                        not self.is_stub_file and
                         not alias.normalized):
                     self.fail(no_subscript_builtin_alias(name, propose_alt=False), expr)
         # ...or directly.
@@ -5169,8 +5175,7 @@ class SemanticAnalyzer(NodeVisitor[None],
                             allow_tuple_literal=allow_tuple_literal,
                             report_invalid_types=report_invalid_types,
                             allow_placeholder=allow_placeholder,
-                            allow_required=allow_required,
-                            allow_new_syntax=self.is_stub_file)
+                            allow_required=allow_required)
         tpan.in_dynamic_func = bool(self.function_stack and self.function_stack[-1].is_dynamic())
         tpan.global_scope = not self.type and not self.function_stack
         return tpan
