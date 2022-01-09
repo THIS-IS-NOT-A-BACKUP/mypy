@@ -1273,7 +1273,7 @@ class CallableType(FunctionLike):
         return sum([kind.is_positional() for kind in self.arg_kinds])
 
     def formal_arguments(self, include_star_args: bool = False) -> List[FormalArgument]:
-        """Yields the formal arguments corresponding to this callable, ignoring *arg and **kwargs.
+        """Return a list of the formal arguments of this callable, ignoring *arg and **kwargs.
 
         To handle *args and **kwargs, use the 'callable.var_args' and 'callable.kw_args' fields,
         if they are not None.
@@ -1526,12 +1526,31 @@ class TupleType(ProperType):
 
     def __init__(self, items: List[Type], fallback: Instance, line: int = -1,
                  column: int = -1, implicit: bool = False) -> None:
-        super().__init__(line, column)
-        self.items = items
         self.partial_fallback = fallback
+        self.items = items
         self.implicit = implicit
-        self.can_be_true = len(self.items) > 0
-        self.can_be_false = len(self.items) == 0
+        super().__init__(line, column)
+
+    def can_be_true_default(self) -> bool:
+        if self.can_be_any_bool():
+            # Corner case: it is a `NamedTuple` with `__bool__` method defined.
+            # It can be anything: both `True` and `False`.
+            return True
+        return self.length() > 0
+
+    def can_be_false_default(self) -> bool:
+        if self.can_be_any_bool():
+            # Corner case: it is a `NamedTuple` with `__bool__` method defined.
+            # It can be anything: both `True` and `False`.
+            return True
+        return self.length() == 0
+
+    def can_be_any_bool(self) -> bool:
+        return bool(
+            self.partial_fallback.type
+            and self.partial_fallback.type.fullname != 'builtins.tuple'
+            and self.partial_fallback.type.names.get('__bool__')
+        )
 
     def length(self) -> int:
         return len(self.items)
