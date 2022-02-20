@@ -65,6 +65,7 @@ KT = TypeVar('KT')
 VT = TypeVar('VT')
 
 class object:
+    __module__: str
     def __init__(self) -> None: pass
 class type: ...
 
@@ -142,7 +143,11 @@ def collect_cases(fn: Callable[..., Iterator[Case]]) -> Callable[..., None]:
         for c in cases:
             if c.error is None:
                 continue
-            expected_error = "{}.{}".format(TEST_MODULE_NAME, c.error)
+            expected_error = c.error
+            if expected_error == "":
+                expected_error = TEST_MODULE_NAME
+            elif not expected_error.startswith(f"{TEST_MODULE_NAME}."):
+                expected_error = f"{TEST_MODULE_NAME}.{expected_error}"
             assert expected_error not in expected_errors, (
                 "collect_cases merges cases into a single stubtest invocation; we already "
                 "expect an error for {}".format(expected_error)
@@ -710,6 +715,16 @@ class StubtestUnit(unittest.TestCase):
         yield Case(
             stub="from mystery import A, B as B, C as D  # type: ignore", runtime="", error="B"
         )
+        yield Case(
+            stub="class Y: ...",
+            runtime="__all__ += ['Y']\nclass Y:\n  def __or__(self, other): return self|other",
+            error="Y.__or__"
+        )
+        yield Case(
+            stub="class Z: ...",
+            runtime="__all__ += ['Z']\nclass Z:\n  def __reduce__(self): return (Z,)",
+            error=None
+        )
 
     @collect_cases
     def test_missing_no_runtime_all(self) -> Iterator[Case]:
@@ -719,7 +734,9 @@ class StubtestUnit(unittest.TestCase):
 
     @collect_cases
     def test_non_public_1(self) -> Iterator[Case]:
-        yield Case(stub="__all__: list[str]", runtime="", error=None)  # dummy case
+        yield Case(
+            stub="__all__: list[str]", runtime="", error="test_module.__all__"
+        )  # dummy case
         yield Case(stub="_f: int", runtime="def _f(): ...", error="_f")
 
     @collect_cases
@@ -731,7 +748,7 @@ class StubtestUnit(unittest.TestCase):
         yield Case(stub="g: int", runtime="def g(): ...", error="g")
 
     @collect_cases
-    def test_special_dunders(self) -> Iterator[Case]:
+    def test_dunders(self) -> Iterator[Case]:
         yield Case(
             stub="class A:\n  def __init__(self, a: int, b: int) -> None: ...",
             runtime="class A:\n  def __init__(self, a, bx): pass",
