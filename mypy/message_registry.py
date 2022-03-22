@@ -206,6 +206,11 @@ CANNOT_ACCESS_FINAL_INSTANCE_ATTR: Final = (
 )
 CANNOT_MAKE_DELETABLE_FINAL: Final = ErrorMessage("Deletable attribute cannot be final")
 
+# Enum
+ENUM_MEMBERS_ATTR_WILL_BE_OVERRIDEN: Final = ErrorMessage(
+    'Assigned "__members__" will be overriden by "Enum" internally'
+)
+
 # ClassVar
 CANNOT_OVERRIDE_INSTANCE_VAR: Final = ErrorMessage(
     'Cannot override instance variable (previously declared on base class "{}") with class '
@@ -247,3 +252,4 @@ CLASS_PATTERN_KEYWORD_MATCHES_POSITIONAL: Final = (
 CLASS_PATTERN_DUPLICATE_KEYWORD_PATTERN: Final = 'Duplicate keyword pattern "{}"'
 CLASS_PATTERN_UNKNOWN_KEYWORD: Final = 'Class "{}" has no attribute "{}"'
 MULTIPLE_ASSIGNMENTS_IN_PATTERN: Final = 'Multiple assignments to name "{}" in pattern'
+CANNOT_MODIFY_MATCH_ARGS: Final = 'Cannot assign to "__match_args__"'
