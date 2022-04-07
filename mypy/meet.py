@@ -6,13 +6,13 @@ from mypy.types import (
     TupleType, TypedDictType, ErasedType, UnionType, PartialType, DeletedType,
     UninhabitedType, TypeType, TypeOfAny, Overloaded, FunctionLike, LiteralType,
     ProperType, get_proper_type, get_proper_types, TypeAliasType, TypeGuardedType,
-    ParamSpecType, UnpackType,
+    ParamSpecType, Parameters, UnpackType,
 )
 from mypy.subtypes import is_equivalent, is_subtype, is_callable_compatible, is_proper_subtype
 from mypy.erasetype import erase_type
 from mypy.maptype import map_instance_to_supertype
 from mypy.typeops import tuple_fallback, make_simplified_union, is_recursive_pair
-from mypy import state
+from mypy.state import state
 from mypy import join
 
 # TODO Describe this module.
@@ -508,6 +508,17 @@ class TypeMeetVisitor(TypeVisitor[ProperType]):
 
     def visit_unpack_type(self, t: UnpackType) -> ProperType:
         raise NotImplementedError
+
+    def visit_parameters(self, t: Parameters) -> ProperType:
+        # TODO: is this the right variance?
+        if isinstance(self.s, Parameters) or isinstance(self.s, CallableType):
+            if len(t.arg_types) != len(self.s.arg_types):
+                return self.default(self.s)
+            return t.copy_modified(
+                arg_types=[meet_types(s_a, t_a) for s_a, t_a in zip(self.s.arg_types, t.arg_types)]
+            )
+        else:
+            return self.default(self.s)
 
     def visit_instance(self, t: Instance) -> ProperType:
         if isinstance(self.s, Instance):
