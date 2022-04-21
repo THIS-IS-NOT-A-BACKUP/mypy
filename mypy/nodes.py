@@ -2233,7 +2233,10 @@ CONTRAVARIANT: Final = 2
 
 
 class TypeVarLikeExpr(SymbolNode, Expression):
-    """Base class for TypeVarExpr and ParamSpecExpr."""
+    """Base class for TypeVarExpr, ParamSpecExpr and TypeVarTupleExpr.
+
+    Note that they are constructed by the semantic analyzer.
+    """
 
     __slots__ = ('_name', '_fullname', 'upper_bound', 'variance')
 
@@ -2332,6 +2335,34 @@ class ParamSpecExpr(TypeVarLikeExpr):
     def deserialize(cls, data: JsonDict) -> 'ParamSpecExpr':
         assert data['.class'] == 'ParamSpecExpr'
         return ParamSpecExpr(
+            data['name'],
+            data['fullname'],
+            mypy.types.deserialize_type(data['upper_bound']),
+            data['variance']
+        )
+
+
+class TypeVarTupleExpr(TypeVarLikeExpr):
+    """Type variable tuple expression TypeVarTuple(...)."""
+
+    __slots__ = ()
+
+    def accept(self, visitor: ExpressionVisitor[T]) -> T:
+        return visitor.visit_type_var_tuple_expr(self)
+
+    def serialize(self) -> JsonDict:
+        return {
+            '.class': 'TypeVarTupleExpr',
+            'name': self._name,
+            'fullname': self._fullname,
+            'upper_bound': self.upper_bound.serialize(),
+            'variance': self.variance,
+        }
+
+    @classmethod
+    def deserialize(cls, data: JsonDict) -> 'TypeVarTupleExpr':
+        assert data['.class'] == 'TypeVarTupleExpr'
+        return TypeVarTupleExpr(
             data['name'],
             data['fullname'],
             mypy.types.deserialize_type(data['upper_bound']),
@@ -2876,6 +2907,8 @@ class TypeInfo(SymbolNode):
                     None if self.typeddict_type is None else self.typeddict_type.serialize(),
                 'flags': get_flags(self, TypeInfo.FLAGS),
                 'metadata': self.metadata,
+                'slots': list(sorted(self.slots)) if self.slots is not None else None,
+                'deletable_attributes': self.deletable_attributes,
                 }
         return data
 
@@ -2913,6 +2946,8 @@ class TypeInfo(SymbolNode):
         ti.typeddict_type = (None if data['typeddict_type'] is None
                             else mypy.types.TypedDictType.deserialize(data['typeddict_type']))
         ti.metadata = data['metadata']
+        ti.slots = set(data['slots']) if data['slots'] is not None else None
+        ti.deletable_attributes = data['deletable_attributes']
         set_flags(ti, data['flags'])
         return ti
 
