@@ -207,10 +207,11 @@ def test_module(module_name: str) -> Iterator[Error]:
     """
     stub = get_stub(module_name)
     if stub is None:
-        runtime_desc = repr(sys.modules[module_name]) if module_name in sys.modules else "N/A"
-        yield Error(
-            [module_name], "failed to find stubs", MISSING, None, runtime_desc=runtime_desc
-        )
+        if not is_probably_private(module_name.split(".")[-1]):
+            runtime_desc = repr(sys.modules[module_name]) if module_name in sys.modules else "N/A"
+            yield Error(
+                [module_name], "failed to find stubs", MISSING, None, runtime_desc=runtime_desc
+            )
         return
 
     try:
@@ -1175,7 +1176,7 @@ def verify_typealias(
 # ====================
 
 
-IGNORED_MODULE_DUNDERS = frozenset(
+IGNORED_MODULE_DUNDERS: typing_extensions.Final = frozenset(
     {
         "__file__",
         "__doc__",
@@ -1195,7 +1196,7 @@ IGNORED_MODULE_DUNDERS = frozenset(
     }
 )
 
-IGNORABLE_CLASS_DUNDERS = frozenset(
+IGNORABLE_CLASS_DUNDERS: typing_extensions.Final = frozenset(
     {
         # Special attributes
         "__dict__",
