@@ -194,6 +194,7 @@ from mypy.types import (
     TypeTranslator,
     TypeType,
     TypeVarId,
+    TypeVarLikeType,
     TypeVarType,
     UnboundType,
     UninhabitedType,
@@ -747,14 +748,14 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
 
                 # Is the overload alternative's arguments subtypes of the implementation's?
                 if not is_callable_compatible(
-                    impl, sig1, is_compat=is_subtype_no_promote, ignore_return=True
+                    impl, sig1, is_compat=is_subtype, ignore_return=True
                 ):
                     self.msg.overloaded_signatures_arg_specific(i + 1, defn.impl)
 
                 # Is the overload alternative's return type a subtype of the implementation's?
                 if not (
-                    is_subtype_no_promote(sig1.ret_type, impl.ret_type)
-                    or is_subtype_no_promote(impl.ret_type, sig1.ret_type)
+                    is_subtype(sig1.ret_type, impl.ret_type)
+                    or is_subtype(impl.ret_type, sig1.ret_type)
                 ):
                     self.msg.overloaded_signatures_ret_specific(i + 1, defn.impl)
 
@@ -3161,7 +3162,7 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         # TODO: maybe elsewhere; redundant.
         rvalue_type = get_proper_type(rv_type or self.expr_checker.accept(rvalue))
 
-        if isinstance(rvalue_type, TypeVarType):
+        if isinstance(rvalue_type, TypeVarLikeType):
             rvalue_type = get_proper_type(rvalue_type.upper_bound)
 
         if isinstance(rvalue_type, UnionType):
@@ -6484,7 +6485,7 @@ def is_unsafe_overlapping_overload_signatures(
     return is_callable_compatible(
         signature,
         other,
-        is_compat=is_overlapping_types_no_promote,
+        is_compat=is_overlapping_types_no_promote_no_uninhabited,
         is_compat_return=lambda l, r: not is_subtype_no_promote(l, r),
         ignore_return=False,
         check_args_covariantly=True,
@@ -6492,7 +6493,7 @@ def is_unsafe_overlapping_overload_signatures(
     ) or is_callable_compatible(
         other,
         signature,
-        is_compat=is_overlapping_types_no_promote,
+        is_compat=is_overlapping_types_no_promote_no_uninhabited,
         is_compat_return=lambda l, r: not is_subtype_no_promote(r, l),
         ignore_return=False,
         check_args_covariantly=False,
@@ -6976,8 +6977,12 @@ def is_subtype_no_promote(left: Type, right: Type) -> bool:
     return is_subtype(left, right, ignore_promotions=True)
 
 
-def is_overlapping_types_no_promote(left: Type, right: Type) -> bool:
-    return is_overlapping_types(left, right, ignore_promotions=True)
+def is_overlapping_types_no_promote_no_uninhabited(left: Type, right: Type) -> bool:
+    # For the purpose of unsafe overload checks we consider list[<nothing>] and list[int]
+    # non-overlapping. This is consistent with how we treat list[int] and list[str] as
+    # non-overlapping, despite [] belongs to both. Also this will prevent false positives
+    # for failed type inference during unification.
+    return is_overlapping_types(left, right, ignore_promotions=True, ignore_uninhabited=True)
 
 
 def is_private(node_name: str) -> bool:
