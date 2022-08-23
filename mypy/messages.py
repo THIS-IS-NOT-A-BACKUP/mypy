@@ -162,7 +162,10 @@ class MessageBuilder:
     #
 
     def filter_errors(
-        self, *, filter_errors: bool = True, save_filtered_errors: bool = False
+        self,
+        *,
+        filter_errors: bool | Callable[[str, ErrorInfo], bool] = True,
+        save_filtered_errors: bool = False,
     ) -> ErrorWatcher:
         return ErrorWatcher(
             self.errors, filter_errors=filter_errors, save_filtered_errors=save_filtered_errors
@@ -2392,7 +2395,10 @@ def pretty_callable(tp: CallableType) -> str:
         name = tp.arg_names[i]
         if name:
             s += name + ": "
-        s += format_type_bare(tp.arg_types[i])
+        type_str = format_type_bare(tp.arg_types[i])
+        if tp.arg_kinds[i] == ARG_STAR2 and tp.unpack_kwargs:
+            type_str = f"Unpack[{type_str}]"
+        s += type_str
         if tp.arg_kinds[i].is_optional():
             s += " = ..."
         if (

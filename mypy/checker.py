@@ -730,9 +730,10 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
                 # This is to match the direction the implementation's return
                 # needs to be compatible in.
                 if impl_type.variables:
-                    impl = unify_generic_callable(
-                        impl_type,
-                        sig1,
+                    impl: CallableType | None = unify_generic_callable(
+                        # Normalize both before unifying
+                        impl_type.with_unpacked_kwargs(),
+                        sig1.with_unpacked_kwargs(),
                         ignore_return=False,
                         return_constraint_direction=SUPERTYPE_OF,
                     )
@@ -1036,11 +1037,13 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
                 # precise type.
                 if isinstance(item, FuncDef):
                     fdef = item
-                    # Check if __init__ has an invalid, non-None return type.
+                    # Check if __init__ has an invalid return type.
                     if (
                         fdef.info
                         and fdef.name in ("__init__", "__init_subclass__")
-                        and not isinstance(get_proper_type(typ.ret_type), NoneType)
+                        and not isinstance(
+                            get_proper_type(typ.ret_type), (NoneType, UninhabitedType)
+                        )
                         and not self.dynamic_funcs[-1]
                     ):
                         self.fail(
@@ -1167,7 +1170,7 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
                             # builtins.tuple[T] is typing.Tuple[T, ...]
                             arg_type = self.named_generic_type("builtins.tuple", [arg_type])
                     elif typ.arg_kinds[i] == nodes.ARG_STAR2:
-                        if not isinstance(arg_type, ParamSpecType):
+                        if not isinstance(arg_type, ParamSpecType) and not typ.unpack_kwargs:
                             arg_type = self.named_generic_type(
                                 "builtins.dict", [self.str_type(), arg_type]
                             )
@@ -1326,7 +1329,9 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
                 "returns",
                 "but must return a subtype of",
             )
-        elif not isinstance(get_proper_type(bound_type.ret_type), (AnyType, Instance, TupleType)):
+        elif not isinstance(
+            get_proper_type(bound_type.ret_type), (AnyType, Instance, TupleType, UninhabitedType)
+        ):
             self.fail(
                 message_registry.NON_INSTANCE_NEW_TYPE.format(format_type(bound_type.ret_type)),
                 fdef,
@@ -1912,6 +1917,13 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
 
         if fail:
             emitted_msg = False
+
+            # Normalize signatures, so we get better diagnostics.
+            if isinstance(override, (CallableType, Overloaded)):
+                override = override.with_unpacked_kwargs()
+            if isinstance(original, (CallableType, Overloaded)):
+                original = original.with_unpacked_kwargs()
+
             if (
                 isinstance(override, CallableType)
                 and isinstance(original, CallableType)
