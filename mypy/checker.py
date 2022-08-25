@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fnmatch
 import itertools
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
@@ -327,8 +326,6 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
     current_node_deferred = False
     # Is this file a typeshed stub?
     is_typeshed_stub = False
-    # Should strict Optional-related errors be suppressed in this file?
-    suppress_none_errors = False  # TODO: Get it from options instead
     options: Options
     # Used for collecting inferred attribute types so that they can be checked
     # for consistency.
@@ -391,12 +388,7 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         self.is_stub = tree.is_stub
         self.is_typeshed_stub = is_typeshed_file(path)
         self.inferred_attribute_types = None
-        if options.strict_optional_whitelist is None:
-            self.suppress_none_errors = not options.show_none_errors
-        else:
-            self.suppress_none_errors = not any(
-                fnmatch.fnmatch(path, pattern) for pattern in options.strict_optional_whitelist
-            )
+
         # If True, process function definitions. If False, don't. This is used
         # for processing module top levels in fine-grained incremental mode.
         self.recurse_into_functions = True
@@ -453,7 +445,9 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         """
         self.recurse_into_functions = True
         with state.strict_optional_set(self.options.strict_optional):
-            self.errors.set_file(self.path, self.tree.fullname, scope=self.tscope)
+            self.errors.set_file(
+                self.path, self.tree.fullname, scope=self.tscope, options=self.options
+            )
             with self.tscope.module_scope(self.tree.fullname):
                 with self.enter_partial_types(), self.binder.top_frame_context():
                     for d in self.tree.defs:
@@ -492,7 +486,9 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         with state.strict_optional_set(self.options.strict_optional):
             if not todo and not self.deferred_nodes:
                 return False
-            self.errors.set_file(self.path, self.tree.fullname, scope=self.tscope)
+            self.errors.set_file(
+                self.path, self.tree.fullname, scope=self.tscope, options=self.options
+            )
             with self.tscope.module_scope(self.tree.fullname):
                 self.pass_num += 1
                 if not todo:
@@ -959,11 +955,7 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
                 # Function definition overrides a variable initialized via assignment or a
                 # decorated function.
                 orig_type = defn.original_def.type
-                if orig_type is None:
-                    # XXX This can be None, as happens in
-                    # test_testcheck_TypeCheckSuite.testRedefinedFunctionInTryWithElse
-                    self.msg.note("Internal mypy error checking function redefinition", defn)
-                    return
+                assert orig_type is not None, f"Error checking function redefinition {defn}"
                 if isinstance(orig_type, PartialType):
                     if orig_type.type is None:
                         # Ah this is a partial type. Give it the type of the function.
@@ -5604,8 +5596,6 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
             subtype, supertype, context, msg_text, subtype_label, supertype_label, code=code
         ):
             return False
-        if self.should_suppress_optional_error([subtype]):
-            return False
         extra_info: list[str] = []
         note_msg = ""
         notes: list[str] = []
@@ -5704,9 +5694,6 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
                 and any(self.contains_none(it) for it in t.args)
             )
         )
-
-    def should_suppress_optional_error(self, related_types: list[Type]) -> bool:
-        return self.suppress_none_errors and any(self.contains_none(t) for t in related_types)
 
     def named_type(self, name: str) -> Instance:
         """Return an instance type with given name and implicit Any type args.
