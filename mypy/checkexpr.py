@@ -380,6 +380,8 @@ class ExpressionChecker(ExpressionVisitor[Type]):
         module_attrs = {}
         immutable = set()
         for name, n in node.names.items():
+            if not n.module_public:
+                continue
             if isinstance(n.node, Var) and n.node.is_final:
                 immutable.add(name)
             typ = self.chk.determine_type_of_member(n)
@@ -819,7 +821,7 @@ class ExpressionChecker(ExpressionVisitor[Type]):
                     lvalue_type=item_expected_type,
                     rvalue=item_value,
                     context=item_value,
-                    msg=message_registry.INCOMPATIBLE_TYPES,
+                    msg=message_registry.INCOMPATIBLE_TYPES.value,
                     lvalue_name=f'TypedDict item "{item_name}"',
                     rvalue_name="expression",
                     code=codes.TYPEDDICT_ITEM,
