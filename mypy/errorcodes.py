@@ -33,7 +33,9 @@ ARG_TYPE: Final = ErrorCode("arg-type", "Check argument types in calls", "Genera
 CALL_OVERLOAD: Final = ErrorCode(
     "call-overload", "Check that an overload variant matches arguments", "General"
 )
-VALID_TYPE: Final = ErrorCode("valid-type", "Check that type (annotation) is valid", "General")
+VALID_TYPE: Final[ErrorCode] = ErrorCode(
+    "valid-type", "Check that type (annotation) is valid", "General"
+)
 VAR_ANNOTATED: Final = ErrorCode(
     "var-annotated", "Require variable annotation if type can't be inferred", "General"
 )
@@ -121,6 +123,12 @@ NO_ANY_RETURN: Final = ErrorCode(
 )
 UNREACHABLE: Final = ErrorCode(
     "unreachable", "Warn about unreachable statements or expressions", "General"
+)
+PARTIALLY_DEFINED: Final[ErrorCode] = ErrorCode(
+    "partially-defined",
+    "Warn about variables that are defined only in some execution paths",
+    "General",
+    default_enabled=False,
 )
 REDUNDANT_EXPR: Final = ErrorCode(
     "redundant-expr", "Warn about redundant expressions", "General", default_enabled=False
