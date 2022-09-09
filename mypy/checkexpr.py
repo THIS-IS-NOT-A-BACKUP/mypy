@@ -1506,7 +1506,7 @@ class ExpressionChecker(ExpressionVisitor[Type]):
             res = type_object_type(item.type, self.named_type)
             if isinstance(res, CallableType):
                 res = res.copy_modified(from_type_type=True)
-            expanded = get_proper_type(expand_type_by_instance(res, item))
+            expanded = expand_type_by_instance(res, item)
             if isinstance(expanded, CallableType):
                 # Callee of the form Type[...] should never be generic, only
                 # proper class objects can be.
@@ -3724,6 +3724,11 @@ class ExpressionChecker(ExpressionVisitor[Type]):
         )
         target_type = expr.type
         if not is_same_type(source_type, target_type):
+            if not self.chk.in_checked_function():
+                self.msg.note(
+                    '"assert_type" expects everything to be "Any" in unchecked functions',
+                    expr.expr,
+                )
             self.msg.assert_type_fail(source_type, target_type, expr)
         return source_type
 

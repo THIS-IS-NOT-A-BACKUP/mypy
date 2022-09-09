@@ -668,16 +668,10 @@ class BuildManager:
                 raise CompileError(
                     [f"Failed to find builtin module {module}, perhaps typeshed is broken?"]
                 )
-            if is_typeshed_file(path):
+            if is_typeshed_file(options.abs_custom_typeshed_dir, path) or is_stub_package_file(
+                path
+            ):
                 continue
-            if is_stub_package_file(path):
-                continue
-            if options.custom_typeshed_dir is not None:
-                # Check if module lives under custom_typeshed_dir subtree
-                custom_typeshed_dir = os.path.abspath(options.custom_typeshed_dir)
-                path = os.path.abspath(path)
-                if os.path.commonpath((path, custom_typeshed_dir)) == custom_typeshed_dir:
-                    continue
 
             raise CompileError(
                 [
@@ -2742,8 +2736,7 @@ def module_not_found(
     else:
         daemon = manager.options.fine_grained_incremental
         msg, notes = reason.error_message_templates(daemon)
-        pyver = "%d.%d" % manager.options.python_version
-        errors.report(line, 0, msg.format(module=target, pyver=pyver), code=codes.IMPORT)
+        errors.report(line, 0, msg.format(module=target), code=codes.IMPORT)
         top_level, second_level = get_top_two_prefixes(target)
         if second_level in legacy_bundled_packages:
             top_level = second_level
