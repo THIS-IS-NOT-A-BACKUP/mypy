@@ -296,6 +296,8 @@ class Options:
         self.fast_exit = True
         # fast path for finding modules from source set
         self.fast_module_lookup = False
+        # Allow empty function bodies even if it is not safe, used for testing only.
+        self.allow_empty_bodies = False
         # Used to transform source code before parsing if not None
         # TODO: Make the type precise (AnyStr -> AnyStr)
         self.transform_source: Callable[[Any], Any] | None = None
@@ -310,8 +312,8 @@ class Options:
         # skip most errors after this many messages have been reported.
         # -1 means unlimited.
         self.many_errors_threshold = defaults.MANY_ERRORS_THRESHOLD
-        # Enable recursive type aliases (currently experimental)
-        self.enable_recursive_aliases = False
+        # Disable recursive type aliases (currently experimental)
+        self.disable_recursive_aliases = False
 
     # To avoid breaking plugin compatibility, keep providing new_semantic_analyzer
     @property

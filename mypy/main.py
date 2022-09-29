@@ -975,9 +975,9 @@ def process_options(
         help="Use a custom typing module",
     )
     internals_group.add_argument(
-        "--enable-recursive-aliases",
+        "--disable-recursive-aliases",
         action="store_true",
-        help="Experimental support for recursive type aliases",
+        help="Disable experimental support for recursive type aliases",
     )
     internals_group.add_argument(
         "--custom-typeshed-dir", metavar="DIR", help="Use the custom typeshed in DIR"
@@ -999,6 +999,11 @@ def process_options(
         "the contents of SHADOW_FILE instead.",
     )
     add_invertible_flag("--fast-exit", default=True, help=argparse.SUPPRESS, group=internals_group)
+    # This flag is useful for mypy tests, where function bodies may be omitted. Plugin developers
+    # may want to use this as well in their tests.
+    add_invertible_flag(
+        "--allow-empty-bodies", default=False, help=argparse.SUPPRESS, group=internals_group
+    )
 
     report_group = parser.add_argument_group(
         title="Report generation", description="Generate a report in the specified format."
