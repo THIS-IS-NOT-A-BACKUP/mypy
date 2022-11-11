@@ -1869,6 +1869,23 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
                 original_class_or_static = False  # a variable can't be class or static
 
             if isinstance(original_type, FunctionLike):
+                active_self_type = self.scope.active_self_type()
+                if isinstance(original_type, Overloaded) and active_self_type:
+                    # If we have an overload, filter to overloads that match the self type.
+                    # This avoids false positives for concrete subclasses of generic classes,
+                    # see testSelfTypeOverrideCompatibility for an example.
+                    # It's possible we might want to do this as part of bind_and_map_method
+                    filtered_items = [
+                        item
+                        for item in original_type.items
+                        if not item.arg_types or is_subtype(active_self_type, item.arg_types[0])
+                    ]
+                    # If we don't have any filtered_items, maybe it's always a valid override
+                    # of the superclass? However if you get to that point you're in murky type
+                    # territory anyway, so we just preserve the type and have the behaviour match
+                    # that of older versions of mypy.
+                    if filtered_items:
+                        original_type = Overloaded(filtered_items)
                 original_type = self.bind_and_map_method(base_attr, original_type, defn.info, base)
                 if original_node and is_property(original_node):
                     original_type = get_property_type(original_type)
@@ -2292,9 +2309,7 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         ):
             return False
 
-        if self.is_stub or sym.node.has_explicit_value:
-            return True
-        return False
+        return self.is_stub or sym.node.has_explicit_value
 
     def check_enum_bases(self, defn: ClassDef) -> None:
         """
@@ -5978,10 +5993,7 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         self._type_maps[-1][node] = typ
 
     def has_type(self, node: Expression) -> bool:
-        for m in reversed(self._type_maps):
-            if node in m:
-                return True
-        return False
+        return any(node in m for m in reversed(self._type_maps))
 
     def lookup_type_or_none(self, node: Expression) -> Type | None:
         for m in reversed(self._type_maps):
@@ -6152,13 +6164,11 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
             return fixup_partial_type(typ)
 
     def is_defined_in_base_class(self, var: Var) -> bool:
-        if var.info:
-            for base in var.info.mro[1:]:
-                if base.get(var.name) is not None:
-                    return True
-            if var.info.fallback_to_any:
-                return True
-        return False
+        if not var.info:
+            return False
+        return var.info.fallback_to_any or any(
+            base.get(var.name) is not None for base in var.info.mro[1:]
+        )
 
     def find_partial_types(self, var: Var) -> dict[Var, Context] | None:
         """Look for an active partial type scope containing variable.
@@ -6354,8 +6364,7 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         elif isinstance(node, OverloadedFuncDef) and node.is_property:
             first_item = cast(Decorator, node.items[0])
             return first_item.var.is_settable_property
-        else:
-            return False
+        return False
 
     def get_isinstance_type(self, expr: Expression) -> list[TypeRange] | None:
         if isinstance(expr, OpExpr) and expr.op == "|":
