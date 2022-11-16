@@ -8,7 +8,7 @@ import mypy.applytype
 import mypy.constraints
 import mypy.typeops
 from mypy.erasetype import erase_type
-from mypy.expandtype import expand_type_by_instance
+from mypy.expandtype import expand_self_type, expand_type_by_instance
 from mypy.maptype import map_instance_to_supertype
 
 # Circular import; done in the function instead.
@@ -1040,7 +1040,10 @@ def is_protocol_implementation(
                 if not is_subtype(supertype, subtype):
                     return False
             if not class_obj:
-                if (IS_CLASSVAR in subflags) != (IS_CLASSVAR in superflags):
+                if IS_SETTABLE not in superflags:
+                    if IS_CLASSVAR in superflags and IS_CLASSVAR not in subflags:
+                        return False
+                elif (IS_CLASSVAR in subflags) != (IS_CLASSVAR in superflags):
                     return False
             else:
                 if IS_VAR in superflags and IS_CLASSVAR not in subflags:
@@ -1196,6 +1199,8 @@ def find_node_type(
         )
     else:
         typ = node.type
+        if typ is not None:
+            typ = expand_self_type(node, typ, subtype)
     p_typ = get_proper_type(typ)
     if typ is None:
         return AnyType(TypeOfAny.from_error)
@@ -1665,8 +1670,12 @@ def unify_generic_callable(
         nonlocal had_errors
         had_errors = True
 
+    # This function may be called by the solver, so we need to allow erased types here.
+    # We anyway allow checking subtyping between other types containing <Erased>
+    # (probably also because solver needs subtyping). See also comment in
+    # ExpandTypeVisitor.visit_erased_type().
     applied = mypy.applytype.apply_generic_arguments(
-        type, non_none_inferred_vars, report, context=target
+        type, non_none_inferred_vars, report, context=target, allow_erased_callables=True
     )
     if had_errors:
         return None
