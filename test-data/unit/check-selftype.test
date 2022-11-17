@@ -792,6 +792,26 @@ reveal_type(f.copy())  # N: Revealed type is "__main__.File"
 b.copy()  # E: Invalid self argument "Bad" to attribute function "copy" with type "Callable[[T], T]"
 [builtins fixtures/tuple.pyi]
 
+[case testMixinProtocolSuper]
+from typing import Protocol
+
+class Base(Protocol):
+    def func(self) -> int:
+        ...
+
+class TweakFunc:
+    def func(self: Base) -> int:
+        return reveal_type(super().func())  # N: Revealed type is "builtins.int"
+
+class Good:
+    def func(self) -> int: ...
+class C(TweakFunc, Good): pass
+C().func()  # OK
+
+class Bad:
+    def func(self) -> str: ...
+class CC(TweakFunc, Bad): pass  # E: Definition of "func" in base class "TweakFunc" is incompatible with definition in base class "Bad"
+
 [case testBadClassLevelDecoratorHack]
 from typing_extensions import Protocol
 from typing import TypeVar, Any
@@ -1654,7 +1674,7 @@ class C:
     def bar(self) -> Self: ...
     foo: Callable[[S, Self], Tuple[Self, S]]
 
-reveal_type(C().foo)  # N: Revealed type is "def [S] (S`-1, __main__.C) -> Tuple[__main__.C, S`-1]"
+reveal_type(C().foo)  # N: Revealed type is "def [S] (S`1, __main__.C) -> Tuple[__main__.C, S`1]"
 reveal_type(C().foo(42, C()))  # N: Revealed type is "Tuple[__main__.C, builtins.int]"
 class This: ...
 [builtins fixtures/tuple.pyi]
