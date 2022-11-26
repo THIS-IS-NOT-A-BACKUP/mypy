@@ -16,15 +16,21 @@ from mypy.nodes import (
     FuncItem,
     GeneratorExpr,
     IfStmt,
+    Import,
+    ImportFrom,
+    LambdaExpr,
     ListExpr,
     Lvalue,
     MatchStmt,
     NameExpr,
     RaiseStmt,
+    RefExpr,
     ReturnStmt,
+    StarExpr,
     TupleExpr,
     WhileStmt,
     WithStmt,
+    implicit_module_attrs,
 )
 from mypy.patterns import AsPattern, StarredPattern
 from mypy.reachability import ALWAYS_TRUE, infer_pattern_value
@@ -213,6 +219,10 @@ class DefinedVariableTracker:
         return self._scope().branch_stmts[-1].is_undefined(name)
 
 
+def refers_to_builtin(o: RefExpr) -> bool:
+    return o.fullname is not None and o.fullname.startswith("builtins.")
+
+
 class PartiallyDefinedVariableVisitor(ExtendedTraverserVisitor):
     """Detects the following cases:
     - A variable that's defined only part of the time.
@@ -234,7 +244,10 @@ class PartiallyDefinedVariableVisitor(ExtendedTraverserVisitor):
     def __init__(self, msg: MessageBuilder, type_map: dict[Expression, Type]) -> None:
         self.msg = msg
         self.type_map = type_map
+        self.loop_depth = 0
         self.tracker = DefinedVariableTracker()
+        for name in implicit_module_attrs:
+            self.tracker.record_definition(name)
 
     def process_lvalue(self, lvalue: Lvalue | None) -> None:
         if isinstance(lvalue, NameExpr):
@@ -243,6 +256,8 @@ class PartiallyDefinedVariableVisitor(ExtendedTraverserVisitor):
             for ref in refs:
                 self.msg.var_used_before_def(lvalue.name, ref)
             self.tracker.record_definition(lvalue.name)
+        elif isinstance(lvalue, StarExpr):
+            self.process_lvalue(lvalue.expr)
         elif isinstance(lvalue, (ListExpr, TupleExpr)):
             for item in lvalue.items:
                 self.process_lvalue(item)
@@ -290,6 +305,7 @@ class PartiallyDefinedVariableVisitor(ExtendedTraverserVisitor):
         self.tracker.end_branch_statement()
 
     def visit_func_def(self, o: FuncDef) -> None:
+        self.tracker.record_definition(o.name)
         self.tracker.enter_scope()
         super().visit_func_def(o)
         self.tracker.exit_scope()
@@ -319,15 +335,22 @@ class PartiallyDefinedVariableVisitor(ExtendedTraverserVisitor):
         self.process_lvalue(o.index)
         o.index.accept(self)
         self.tracker.start_branch_statement()
+        self.loop_depth += 1
         o.body.accept(self)
         self.tracker.next_branch()
         if o.else_body:
             o.else_body.accept(self)
+        self.loop_depth -= 1
         self.tracker.end_branch_statement()
 
     def visit_return_stmt(self, o: ReturnStmt) -> None:
         super().visit_return_stmt(o)
         self.tracker.skip_branch()
+
+    def visit_lambda_expr(self, o: LambdaExpr) -> None:
+        self.tracker.enter_scope()
+        super().visit_lambda_expr(o)
+        self.tracker.exit_scope()
 
     def visit_assert_stmt(self, o: AssertStmt) -> None:
         super().visit_assert_stmt(o)
@@ -354,7 +377,9 @@ class PartiallyDefinedVariableVisitor(ExtendedTraverserVisitor):
     def visit_while_stmt(self, o: WhileStmt) -> None:
         o.expr.accept(self)
         self.tracker.start_branch_statement()
+        self.loop_depth += 1
         o.body.accept(self)
+        self.loop_depth -= 1
         if not checker.is_true_literal(o.expr):
             self.tracker.next_branch()
             if o.else_body:
@@ -372,6 +397,8 @@ class PartiallyDefinedVariableVisitor(ExtendedTraverserVisitor):
         super().visit_starred_pattern(o)
 
     def visit_name_expr(self, o: NameExpr) -> None:
+        if refers_to_builtin(o):
+            return
         if self.tracker.is_partially_defined(o.name):
             # A variable is only defined in some branches.
             if self.msg.errors.is_error_code_enabled(errorcodes.PARTIALLY_DEFINED):
@@ -380,7 +407,10 @@ class PartiallyDefinedVariableVisitor(ExtendedTraverserVisitor):
             self.tracker.record_definition(o.name)
         elif self.tracker.is_defined_in_different_branch(o.name):
             # A variable is defined in one branch but used in a different branch.
-            self.msg.var_used_before_def(o.name, o)
+            if self.loop_depth > 0:
+                self.msg.variable_may_be_undefined(o.name, o)
+            else:
+                self.msg.var_used_before_def(o.name, o)
         elif self.tracker.is_undefined(o.name):
             # A variable is undefined. It could be due to two things:
             # 1. A variable is just totally undefined
@@ -396,3 +426,24 @@ class PartiallyDefinedVariableVisitor(ExtendedTraverserVisitor):
             expr.accept(self)
             self.process_lvalue(idx)
         o.body.accept(self)
+
+    def visit_import(self, o: Import) -> None:
+        for mod, alias in o.ids:
+            if alias is not None:
+                self.tracker.record_definition(alias)
+            else:
+                # When you do `import x.y`, only `x` becomes defined.
+                names = mod.split(".")
+                if len(names) > 0:
+                    # `names` should always be nonempty, but we don't want mypy
+                    # to crash on invalid code.
+                    self.tracker.record_definition(names[0])
+        super().visit_import(o)
+
+    def visit_import_from(self, o: ImportFrom) -> None:
+        for mod, alias in o.names:
+            name = alias
+            if name is None:
+                name = mod
+            self.tracker.record_definition(name)
+        super().visit_import_from(o)
