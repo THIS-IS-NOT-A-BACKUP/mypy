@@ -33,6 +33,7 @@ from mypy.nodes import (
     WithStmt,
     implicit_module_attrs,
 )
+from mypy.options import Options
 from mypy.patterns import AsPattern, StarredPattern
 from mypy.reachability import ALWAYS_TRUE, infer_pattern_value
 from mypy.traverser import ExtendedTraverserVisitor
@@ -109,11 +110,9 @@ class BranchStatement:
         branch = self.branches[-1]
         return name not in branch.may_be_defined and name not in branch.must_be_defined
 
-    def is_defined_in_different_branch(self, name: str) -> bool:
+    def is_defined_in_a_branch(self, name: str) -> bool:
         assert len(self.branches) > 0
-        if not self.is_undefined(name):
-            return False
-        for b in self.branches[: len(self.branches) - 1]:
+        for b in self.branches:
             if name in b.must_be_defined or name in b.may_be_defined:
                 return True
         return False
@@ -213,7 +212,13 @@ class DefinedVariableTracker:
     def is_defined_in_different_branch(self, name: str) -> bool:
         """This will return true if a variable is defined in a branch that's not the current branch."""
         assert len(self._scope().branch_stmts) > 0
-        return self._scope().branch_stmts[-1].is_defined_in_different_branch(name)
+        stmt = self._scope().branch_stmts[-1]
+        if not stmt.is_undefined(name):
+            return False
+        for stmt in self._scope().branch_stmts:
+            if stmt.is_defined_in_a_branch(name):
+                return True
+        return False
 
     def is_undefined(self, name: str) -> bool:
         assert len(self._scope().branch_stmts) > 0
@@ -247,9 +252,12 @@ class PartiallyDefinedVariableVisitor(ExtendedTraverserVisitor):
     handled by the semantic analyzer.
     """
 
-    def __init__(self, msg: MessageBuilder, type_map: dict[Expression, Type]) -> None:
+    def __init__(
+        self, msg: MessageBuilder, type_map: dict[Expression, Type], options: Options
+    ) -> None:
         self.msg = msg
         self.type_map = type_map
+        self.options = options
         self.loops: list[Loop] = []
         self.tracker = DefinedVariableTracker()
         for name in implicit_module_attrs:
@@ -325,6 +333,8 @@ class PartiallyDefinedVariableVisitor(ExtendedTraverserVisitor):
         self.tracker.exit_scope()
 
     def visit_func(self, o: FuncItem) -> None:
+        if o.is_dynamic() and not self.options.check_untyped_defs:
+            return
         if o.arguments is not None:
             for arg in o.arguments:
                 self.tracker.record_definition(arg.variable.name)
