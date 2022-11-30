@@ -17,6 +17,7 @@ from mypy.nodes import (
     FuncDef,
     FuncItem,
     GeneratorExpr,
+    GlobalDecl,
     IfStmt,
     Import,
     ImportFrom,
@@ -25,6 +26,7 @@ from mypy.nodes import (
     Lvalue,
     MatchStmt,
     NameExpr,
+    NonlocalDecl,
     RaiseStmt,
     RefExpr,
     ReturnStmt,
@@ -119,23 +121,29 @@ class BranchStatement:
         return False
 
     def done(self) -> BranchState:
-        branches = [b for b in self.branches if not b.skipped]
-        if len(branches) == 0:
-            return BranchState(skipped=True)
-        if len(branches) == 1:
-            return branches[0]
-
-        # must_be_defined is a union of must_be_defined of all branches.
-        must_be_defined = set(branches[0].must_be_defined)
-        for b in branches[1:]:
-            must_be_defined.intersection_update(b.must_be_defined)
-        # may_be_defined are all variables that are not must be defined.
+        # First, compute all vars, including skipped branches. We include skipped branches
+        # because our goal is to capture all variables that semantic analyzer would
+        # consider defined.
         all_vars = set()
-        for b in branches:
+        for b in self.branches:
             all_vars.update(b.may_be_defined)
             all_vars.update(b.must_be_defined)
+        # For the rest of the things, we only care about branches that weren't skipped.
+        non_skipped_branches = [b for b in self.branches if not b.skipped]
+        if len(non_skipped_branches) > 0:
+            must_be_defined = non_skipped_branches[0].must_be_defined
+            for b in non_skipped_branches[1:]:
+                must_be_defined.intersection_update(b.must_be_defined)
+        else:
+            must_be_defined = set()
+        # Everything that wasn't defined in all branches but was defined
+        # in at least one branch should be in `may_be_defined`!
         may_be_defined = all_vars.difference(must_be_defined)
-        return BranchState(may_be_defined=may_be_defined, must_be_defined=must_be_defined)
+        return BranchState(
+            must_be_defined=must_be_defined,
+            may_be_defined=may_be_defined,
+            skipped=len(non_skipped_branches) == 0,
+        )
 
 
 class Scope:
@@ -278,6 +286,16 @@ class PartiallyDefinedVariableVisitor(ExtendedTraverserVisitor):
         for ref in refs:
             self.var_used_before_def(name, ref)
         self.tracker.record_definition(name)
+
+    def visit_global_decl(self, o: GlobalDecl) -> None:
+        for name in o.names:
+            self.process_definition(name)
+        super().visit_global_decl(o)
+
+    def visit_nonlocal_decl(self, o: NonlocalDecl) -> None:
+        for name in o.names:
+            self.process_definition(name)
+        super().visit_nonlocal_decl(o)
 
     def process_lvalue(self, lvalue: Lvalue | None) -> None:
         if isinstance(lvalue, NameExpr):
