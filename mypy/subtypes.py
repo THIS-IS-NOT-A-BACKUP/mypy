@@ -289,18 +289,20 @@ def _is_subtype(
         # ErasedType as we do for non-proper subtyping.
         return True
 
-    def check_item(left: Type, right: Type, subtype_context: SubtypeContext) -> bool:
-        if proper_subtype:
-            return is_proper_subtype(left, right, subtype_context=subtype_context)
-        return is_subtype(left, right, subtype_context=subtype_context)
-
     if isinstance(right, UnionType) and not isinstance(left, UnionType):
         # Normally, when 'left' is not itself a union, the only way
         # 'left' can be a subtype of the union 'right' is if it is a
         # subtype of one of the items making up the union.
-        is_subtype_of_item = any(
-            check_item(orig_left, item, subtype_context) for item in right.items
-        )
+        if proper_subtype:
+            is_subtype_of_item = any(
+                is_proper_subtype(orig_left, item, subtype_context=subtype_context)
+                for item in right.items
+            )
+        else:
+            is_subtype_of_item = any(
+                is_subtype(orig_left, item, subtype_context=subtype_context)
+                for item in right.items
+            )
         # Recombine rhs literal types, to make an enum type a subtype
         # of a union of all enum items as literal types. Only do it if
         # the previous check didn't succeed, since recombining can be
@@ -312,9 +314,16 @@ def _is_subtype(
             and (left.type.is_enum or left.type.fullname == "builtins.bool")
         ):
             right = UnionType(mypy.typeops.try_contracting_literals_in_union(right.items))
-            is_subtype_of_item = any(
-                check_item(orig_left, item, subtype_context) for item in right.items
-            )
+            if proper_subtype:
+                is_subtype_of_item = any(
+                    is_proper_subtype(orig_left, item, subtype_context=subtype_context)
+                    for item in right.items
+                )
+            else:
+                is_subtype_of_item = any(
+                    is_subtype(orig_left, item, subtype_context=subtype_context)
+                    for item in right.items
+                )
         # However, if 'left' is a type variable T, T might also have
         # an upper bound which is itself a union. This case will be
         # handled below by the SubtypeVisitor. We have to check both
@@ -330,34 +339,28 @@ def _is_subtype(
 
 
 def check_type_parameter(
-    lefta: Type, righta: Type, variance: int, proper_subtype: bool, subtype_context: SubtypeContext
+    left: Type, right: Type, variance: int, proper_subtype: bool, subtype_context: SubtypeContext
 ) -> bool:
-    def check(left: Type, right: Type) -> bool:
-        return (
-            is_proper_subtype(left, right, subtype_context=subtype_context)
-            if proper_subtype
-            else is_subtype(left, right, subtype_context=subtype_context)
-        )
-
     if variance == COVARIANT:
-        return check(lefta, righta)
+        if proper_subtype:
+            return is_proper_subtype(left, right, subtype_context=subtype_context)
+        else:
+            return is_subtype(left, right, subtype_context=subtype_context)
     elif variance == CONTRAVARIANT:
-        return check(righta, lefta)
+        if proper_subtype:
+            return is_proper_subtype(right, left, subtype_context=subtype_context)
+        else:
+            return is_subtype(right, left, subtype_context=subtype_context)
     else:
         if proper_subtype:
             # We pass ignore_promotions=False because it is a default for subtype checks.
             # The actual value will be taken from the subtype_context, and it is whatever
             # the original caller passed.
             return is_same_type(
-                lefta, righta, ignore_promotions=False, subtype_context=subtype_context
+                left, right, ignore_promotions=False, subtype_context=subtype_context
             )
-        return is_equivalent(lefta, righta, subtype_context=subtype_context)
-
-
-def ignore_type_parameter(
-    lefta: Type, righta: Type, variance: int, proper_subtype: bool, subtype_context: SubtypeContext
-) -> bool:
-    return True
+        else:
+            return is_equivalent(left, right, subtype_context=subtype_context)
 
 
 class SubtypeVisitor(TypeVisitor[bool]):
@@ -366,9 +369,6 @@ class SubtypeVisitor(TypeVisitor[bool]):
         self.orig_right = right
         self.proper_subtype = proper_subtype
         self.subtype_context = subtype_context
-        self.check_type_parameter = (
-            ignore_type_parameter if subtype_context.ignore_type_params else check_type_parameter
-        )
         self.options = subtype_context.options
         self._subtype_kind = SubtypeVisitor.build_subtype_kind(subtype_context, proper_subtype)
 
@@ -572,17 +572,22 @@ class SubtypeVisitor(TypeVisitor[bool]):
                     )
                 else:
                     type_params = zip(t.args, right.args, right.type.defn.type_vars)
-                for lefta, righta, tvar in type_params:
-                    if isinstance(tvar, TypeVarType):
-                        if not self.check_type_parameter(
-                            lefta, righta, tvar.variance, self.proper_subtype, self.subtype_context
-                        ):
-                            nominal = False
-                    else:
-                        if not self.check_type_parameter(
-                            lefta, righta, COVARIANT, self.proper_subtype, self.subtype_context
-                        ):
-                            nominal = False
+                if not self.subtype_context.ignore_type_params:
+                    for lefta, righta, tvar in type_params:
+                        if isinstance(tvar, TypeVarType):
+                            if not check_type_parameter(
+                                lefta,
+                                righta,
+                                tvar.variance,
+                                self.proper_subtype,
+                                self.subtype_context,
+                            ):
+                                nominal = False
+                        else:
+                            if not check_type_parameter(
+                                lefta, righta, COVARIANT, self.proper_subtype, self.subtype_context
+                            ):
+                                nominal = False
                 if nominal:
                     TypeState.record_subtype_cache_entry(self._subtype_kind, left, right)
                 return nominal
