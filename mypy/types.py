@@ -2334,6 +2334,10 @@ class TypedDictType(ProperType):
             Instance.deserialize(data["fallback"]),
         )
 
+    @property
+    def is_final(self) -> bool:
+        return self.fallback.type.is_final
+
     def is_anonymous(self) -> bool:
         return self.fallback.type.fullname in TPDICT_FB_NAMES
 
@@ -3301,9 +3305,9 @@ def replace_alias_tvars(
     return new_tp
 
 
-class HasTypeVars(TypeQuery[bool]):
+class HasTypeVars(BoolTypeQuery):
     def __init__(self) -> None:
-        super().__init__(any)
+        super().__init__(ANY_STRATEGY)
         self.skip_alias_target = True
 
     def visit_type_var(self, t: TypeVarType) -> bool:
