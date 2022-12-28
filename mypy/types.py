@@ -153,6 +153,9 @@ NEVER_NAMES: Final = (
 # A placeholder used for Bogus[...] parameters
 _dummy: Final[Any] = object()
 
+# A placeholder for int parameters
+_dummy_int: Final = -999999
+
 
 class TypeOfAny:
     """
@@ -198,7 +201,7 @@ def deserialize_type(data: JsonDict | str) -> Type:
 class Type(mypy.nodes.Context):
     """Abstract base class for all types."""
 
-    __slots__ = ("can_be_true", "can_be_false")
+    __slots__ = ("_can_be_true", "_can_be_false")
     # 'can_be_true' and 'can_be_false' mean whether the value of the
     # expression can be true or false in a boolean context. They are useful
     # when inferring the type of logic expressions like `x and y`.
@@ -211,8 +214,29 @@ class Type(mypy.nodes.Context):
 
     def __init__(self, line: int = -1, column: int = -1) -> None:
         super().__init__(line, column)
-        self.can_be_true = self.can_be_true_default()
-        self.can_be_false = self.can_be_false_default()
+        # Value of these can be -1 (use the default, lazy init), 0 (false) or 1 (true)
+        self._can_be_true = -1
+        self._can_be_false = -1
+
+    @property
+    def can_be_true(self) -> bool:
+        if self._can_be_true == -1:  # Lazy init helps mypyc
+            self._can_be_true = self.can_be_true_default()
+        return bool(self._can_be_true)
+
+    @can_be_true.setter
+    def can_be_true(self, v: bool) -> None:
+        self._can_be_true = v
+
+    @property
+    def can_be_false(self) -> bool:
+        if self._can_be_false == -1:  # Lazy init helps mypyc
+            self._can_be_false = self.can_be_false_default()
+        return bool(self._can_be_false)
+
+    @can_be_false.setter
+    def can_be_false(self, v: bool) -> None:
+        self._can_be_false = v
 
     def can_be_true_default(self) -> bool:
         return True
@@ -261,10 +285,10 @@ class TypeAliasType(Type):
         line: int = -1,
         column: int = -1,
     ) -> None:
+        super().__init__(line, column)
         self.alias = alias
         self.args = args
         self.type_ref: str | None = None
-        super().__init__(line, column)
 
     def _expand_once(self) -> Type:
         """Expand to the target type exactly once.
@@ -540,8 +564,8 @@ class TypeVarType(TypeVarLikeType):
         values: Bogus[list[Type]] = _dummy,
         upper_bound: Bogus[Type] = _dummy,
         id: Bogus[TypeVarId | int] = _dummy,
-        line: Bogus[int] = _dummy,
-        column: Bogus[int] = _dummy,
+        line: int = _dummy_int,
+        column: int = _dummy_int,
     ) -> TypeVarType:
         return TypeVarType(
             self.name,
@@ -550,8 +574,8 @@ class TypeVarType(TypeVarLikeType):
             self.values if values is _dummy else values,
             self.upper_bound if upper_bound is _dummy else upper_bound,
             self.variance,
-            self.line if line is _dummy else line,
-            self.column if column is _dummy else column,
+            self.line if line == _dummy_int else line,
+            self.column if column == _dummy_int else column,
         )
 
     def accept(self, visitor: TypeVisitor[T]) -> T:
@@ -658,14 +682,14 @@ class ParamSpecType(TypeVarLikeType):
         self,
         *,
         id: Bogus[TypeVarId | int] = _dummy,
-        flavor: Bogus[int] = _dummy,
+        flavor: int = _dummy_int,
         prefix: Bogus[Parameters] = _dummy,
     ) -> ParamSpecType:
         return ParamSpecType(
             self.name,
             self.fullname,
             id if id is not _dummy else self.id,
-            flavor if flavor is not _dummy else self.flavor,
+            flavor if flavor != _dummy_int else self.flavor,
             self.upper_bound,
             line=self.line,
             column=self.column,
@@ -1024,10 +1048,10 @@ class AnyType(ProperType):
     def copy_modified(
         self,
         # Mark with Bogus because _dummy is just an object (with type Any)
-        type_of_any: Bogus[int] = _dummy,
+        type_of_any: int = _dummy_int,
         original_any: Bogus[AnyType | None] = _dummy,
     ) -> AnyType:
-        if type_of_any is _dummy:
+        if type_of_any == _dummy_int:
             type_of_any = self.type_of_any
         if original_any is _dummy:
             original_any = self.source_any
@@ -1421,7 +1445,7 @@ class FunctionLike(ProperType):
 
     def __init__(self, line: int = -1, column: int = -1) -> None:
         super().__init__(line, column)
-        self.can_be_false = False
+        self._can_be_false = False
 
     @abstractmethod
     def is_type_obj(self) -> bool:
@@ -1745,8 +1769,8 @@ class CallableType(FunctionLike):
         name: Bogus[str | None] = _dummy,
         definition: Bogus[SymbolNode] = _dummy,
         variables: Bogus[Sequence[TypeVarLikeType]] = _dummy,
-        line: Bogus[int] = _dummy,
-        column: Bogus[int] = _dummy,
+        line: int = _dummy_int,
+        column: int = _dummy_int,
         is_ellipsis_args: Bogus[bool] = _dummy,
         implicit: Bogus[bool] = _dummy,
         special_sig: Bogus[str | None] = _dummy,
@@ -1766,8 +1790,8 @@ class CallableType(FunctionLike):
             name=name if name is not _dummy else self.name,
             definition=definition if definition is not _dummy else self.definition,
             variables=variables if variables is not _dummy else self.variables,
-            line=line if line is not _dummy else self.line,
-            column=column if column is not _dummy else self.column,
+            line=line if line != _dummy_int else self.line,
+            column=column if column != _dummy_int else self.column,
             is_ellipsis_args=(
                 is_ellipsis_args if is_ellipsis_args is not _dummy else self.is_ellipsis_args
             ),
@@ -2180,10 +2204,10 @@ class TupleType(ProperType):
         column: int = -1,
         implicit: bool = False,
     ) -> None:
+        super().__init__(line, column)
         self.partial_fallback = fallback
         self.items = items
         self.implicit = implicit
-        super().__init__(line, column)
 
     def can_be_true_default(self) -> bool:
         if self.can_be_any_bool():
@@ -2492,8 +2516,8 @@ class LiteralType(ProperType):
     def __init__(
         self, value: LiteralValue, fallback: Instance, line: int = -1, column: int = -1
     ) -> None:
-        self.value = value
         super().__init__(line, column)
+        self.value = value
         self.fallback = fallback
         self._hash = -1  # Cached hash value
 
@@ -3341,6 +3365,15 @@ def has_recursive_types(typ: Type) -> bool:
     """Check if a type contains any recursive aliases (recursively)."""
     _has_recursive_type.reset()
     return typ.accept(_has_recursive_type)
+
+
+def _flattened(types: Iterable[Type]) -> Iterable[Type]:
+    for t in types:
+        tp = get_proper_type(t)
+        if isinstance(tp, UnionType):
+            yield from _flattened(tp.items)
+        else:
+            yield t
 
 
 def flatten_nested_unions(
