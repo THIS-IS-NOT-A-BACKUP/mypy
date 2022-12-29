@@ -2623,12 +2623,16 @@ class UnionType(ProperType):
         # We must keep this false to avoid crashes during semantic analysis.
         # TODO: maybe switch this to True during type-checking pass?
         self.items = flatten_nested_unions(items, handle_type_alias_type=False)
-        self.can_be_true = any(item.can_be_true for item in items)
-        self.can_be_false = any(item.can_be_false for item in items)
         # is_evaluated should be set to false for type comments and string literals
         self.is_evaluated = is_evaluated
         # uses_pep604_syntax is True if Union uses OR syntax (X | Y)
         self.uses_pep604_syntax = uses_pep604_syntax
+
+    def can_be_true_default(self) -> bool:
+        return any(item.can_be_true for item in self.items)
+
+    def can_be_false_default(self) -> bool:
+        return any(item.can_be_false for item in self.items)
 
     def __hash__(self) -> int:
         return hash(frozenset(self.items))
@@ -2884,23 +2888,35 @@ def get_proper_type(typ: Type | None) -> ProperType | None:
         typ = typ.type_guard
     while isinstance(typ, TypeAliasType):
         typ = typ._expand_once()
-    assert isinstance(typ, ProperType), typ
     # TODO: store the name of original type alias on this type, so we can show it in errors.
-    return typ
+    return cast(ProperType, typ)
 
 
 @overload
-def get_proper_types(it: Iterable[Type]) -> list[ProperType]:  # type: ignore[misc]
+def get_proper_types(types: list[Type] | tuple[Type, ...]) -> list[ProperType]:  # type: ignore[misc]
     ...
 
 
 @overload
-def get_proper_types(it: Iterable[Type | None]) -> list[ProperType | None]:
+def get_proper_types(
+    types: list[Type | None] | tuple[Type | None, ...]
+) -> list[ProperType | None]:
     ...
 
 
-def get_proper_types(it: Iterable[Type | None]) -> list[ProperType] | list[ProperType | None]:
-    return [get_proper_type(t) for t in it]
+def get_proper_types(
+    types: list[Type] | list[Type | None] | tuple[Type | None, ...]
+) -> list[ProperType] | list[ProperType | None]:
+    if isinstance(types, list):
+        typelist = types
+        # Optimize for the common case so that we don't need to allocate anything
+        if not any(
+            isinstance(t, (TypeAliasType, TypeGuardedType)) for t in typelist  # type: ignore[misc]
+        ):
+            return cast("list[ProperType]", typelist)
+        return [get_proper_type(t) for t in typelist]
+    else:
+        return [get_proper_type(t) for t in types]
 
 
 # We split off the type visitor base classes to another module
@@ -3377,12 +3393,20 @@ def _flattened(types: Iterable[Type]) -> Iterable[Type]:
 
 
 def flatten_nested_unions(
-    types: Iterable[Type], handle_type_alias_type: bool = True
+    types: Sequence[Type], handle_type_alias_type: bool = True
 ) -> list[Type]:
     """Flatten nested unions in a type list."""
+    if not isinstance(types, list):
+        typelist = list(types)
+    else:
+        typelist = cast("list[Type]", types)
+
+    # Fast path: most of the time there is nothing to flatten
+    if not any(isinstance(t, (TypeAliasType, UnionType)) for t in typelist):  # type: ignore[misc]
+        return typelist
+
     flat_items: list[Type] = []
-    # TODO: avoid duplicate types in unions (e.g. using hash)
-    for t in types:
+    for t in typelist:
         tp = get_proper_type(t) if handle_type_alias_type else t
         if isinstance(tp, ProperType) and isinstance(tp, UnionType):
             flat_items.extend(
