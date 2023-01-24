@@ -2970,7 +2970,7 @@ class ExpressionChecker(ExpressionVisitor[Type]):
                     not local_errors.has_new_errors()
                     and cont_type
                     and self.dangerous_comparison(
-                        left_type, cont_type, original_container=right_type
+                        left_type, cont_type, original_container=right_type, prefer_literal=False
                     )
                 ):
                     self.msg.dangerous_comparison(left_type, cont_type, "container", e)
@@ -2988,27 +2988,19 @@ class ExpressionChecker(ExpressionVisitor[Type]):
                 # testCustomEqCheckStrictEquality for an example.
                 if not w.has_new_errors() and operator in ("==", "!="):
                     right_type = self.accept(right)
-                    # We suppress the error if there is a custom __eq__() method on either
-                    # side. User defined (or even standard library) classes can define this
-                    # to return True for comparisons between non-overlapping types.
-                    if not custom_special_method(
-                        left_type, "__eq__"
-                    ) and not custom_special_method(right_type, "__eq__"):
-                        # Also flag non-overlapping literals in situations like:
-                        #    x: Literal['a', 'b']
-                        #    if x == 'c':
-                        #        ...
+                    if self.dangerous_comparison(left_type, right_type):
+                        # Show the most specific literal types possible
                         left_type = try_getting_literal(left_type)
                         right_type = try_getting_literal(right_type)
-                        if self.dangerous_comparison(left_type, right_type):
-                            self.msg.dangerous_comparison(left_type, right_type, "equality", e)
+                        self.msg.dangerous_comparison(left_type, right_type, "equality", e)
 
             elif operator == "is" or operator == "is not":
                 right_type = self.accept(right)  # validate the right operand
                 sub_result = self.bool_type()
-                left_type = try_getting_literal(left_type)
-                right_type = try_getting_literal(right_type)
                 if self.dangerous_comparison(left_type, right_type):
+                    # Show the most specific literal types possible
+                    left_type = try_getting_literal(left_type)
+                    right_type = try_getting_literal(right_type)
                     self.msg.dangerous_comparison(left_type, right_type, "identity", e)
                 method_type = None
             else:
@@ -3042,7 +3034,12 @@ class ExpressionChecker(ExpressionVisitor[Type]):
         return None
 
     def dangerous_comparison(
-        self, left: Type, right: Type, original_container: Type | None = None
+        self,
+        left: Type,
+        right: Type,
+        original_container: Type | None = None,
+        *,
+        prefer_literal: bool = True,
     ) -> bool:
         """Check for dangerous non-overlapping comparisons like 42 == 'no'.
 
@@ -3063,6 +3060,20 @@ class ExpressionChecker(ExpressionVisitor[Type]):
             return False
 
         left, right = get_proper_types((left, right))
+
+        # We suppress the error if there is a custom __eq__() method on either
+        # side. User defined (or even standard library) classes can define this
+        # to return True for comparisons between non-overlapping types.
+        if custom_special_method(left, "__eq__") or custom_special_method(right, "__eq__"):
+            return False
+
+        if prefer_literal:
+            # Also flag non-overlapping literals in situations like:
+            #    x: Literal['a', 'b']
+            #    if x == 'c':
+            #        ...
+            left = try_getting_literal(left)
+            right = try_getting_literal(right)
 
         if self.chk.binder.is_unreachable_warning_suppressed():
             # We are inside a function that contains type variables with value restrictions in
@@ -3094,14 +3105,18 @@ class ExpressionChecker(ExpressionVisitor[Type]):
             return False
         if isinstance(left, Instance) and isinstance(right, Instance):
             # Special case some builtin implementations of AbstractSet.
+            left_name = left.type.fullname
+            right_name = right.type.fullname
             if (
-                left.type.fullname in OVERLAPPING_TYPES_ALLOWLIST
-                and right.type.fullname in OVERLAPPING_TYPES_ALLOWLIST
+                left_name in OVERLAPPING_TYPES_ALLOWLIST
+                and right_name in OVERLAPPING_TYPES_ALLOWLIST
             ):
                 abstract_set = self.chk.lookup_typeinfo("typing.AbstractSet")
                 left = map_instance_to_supertype(left, abstract_set)
                 right = map_instance_to_supertype(right, abstract_set)
-                return not is_overlapping_types(left.args[0], right.args[0])
+                return self.dangerous_comparison(left.args[0], right.args[0])
+            elif left_name in ("builtins.list", "builtins.tuple") and right_name == left_name:
+                return self.dangerous_comparison(left.args[0], right.args[0])
         if isinstance(left, LiteralType) and isinstance(right, LiteralType):
             if isinstance(left.value, bool) and isinstance(right.value, bool):
                 # Comparing different booleans is not dangerous.
