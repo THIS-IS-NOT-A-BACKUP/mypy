@@ -864,6 +864,20 @@ class SemanticAnalyzer(
                     return
                 assert isinstance(result, ProperType)
                 if isinstance(result, CallableType):
+                    # type guards need to have a positional argument, to spec
+                    if (
+                        result.type_guard
+                        and ARG_POS not in result.arg_kinds[self.is_class_scope() :]
+                        and not defn.is_static
+                    ):
+                        self.fail(
+                            "TypeGuard functions must have a positional argument",
+                            result,
+                            code=codes.VALID_TYPE,
+                        )
+                        # in this case, we just kind of just ... remove the type guard.
+                        result = result.copy_modified(type_guard=None)
+
                     result = self.remove_unpack_kwargs(defn, result)
                     if has_self_type and self.type is not None:
                         info = self.type
@@ -3359,7 +3373,7 @@ class SemanticAnalyzer(
                 tvar_def = self.tvar_scope.bind_new(name, tvar_expr)
                 tvar_defs.append(tvar_def)
 
-            res = analyze_type_alias(
+            analyzed, depends_on = analyze_type_alias(
                 typ,
                 self,
                 self.tvar_scope,
@@ -3371,13 +3385,8 @@ class SemanticAnalyzer(
                 global_scope=global_scope,
                 allowed_alias_tvars=tvar_defs,
             )
-        analyzed: Type | None = None
-        if res:
-            analyzed, depends_on = res
-            qualified_tvars = [node.fullname for (name, node) in found_type_vars]
-        else:
-            depends_on = set()
-            qualified_tvars = []
+
+        qualified_tvars = [node.fullname for _name, node in found_type_vars]
         return analyzed, tvar_defs, depends_on, qualified_tvars
 
     def is_pep_613(self, s: AssignmentStmt) -> bool:
