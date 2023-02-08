@@ -140,7 +140,6 @@ from mypy.types import (
     ParamSpecType,
     PartialType,
     ProperType,
-    StarType,
     TupleType,
     Type,
     TypeAliasType,
@@ -724,7 +723,11 @@ class ExpressionChecker(ExpressionVisitor[Type]):
                     literal_value = values[0]
             if literal_value is None:
                 key_context = item_name_expr or item_arg
-                self.chk.fail(message_registry.TYPEDDICT_KEY_MUST_BE_STRING_LITERAL, key_context)
+                self.chk.fail(
+                    message_registry.TYPEDDICT_KEY_MUST_BE_STRING_LITERAL,
+                    key_context,
+                    code=codes.LITERAL_REQ,
+                )
                 return None
             else:
                 item_names.append(literal_value)
@@ -5156,8 +5159,9 @@ class ExpressionChecker(ExpressionVisitor[Type]):
     def visit__promote_expr(self, e: PromoteExpr) -> Type:
         return e.type
 
-    def visit_star_expr(self, e: StarExpr) -> StarType:
-        return StarType(self.accept(e.expr))
+    def visit_star_expr(self, e: StarExpr) -> Type:
+        # TODO: should this ever be called (see e.g. mypyc visitor)?
+        return self.accept(e.expr)
 
     def object_type(self) -> Instance:
         """Return instance type 'object'."""
