@@ -43,7 +43,9 @@ INCOMPATIBLE_RETURN_VALUE_TYPE: Final = ErrorMessage(
 RETURN_VALUE_EXPECTED: Final = ErrorMessage("Return value expected", codes.RETURN_VALUE)
 NO_RETURN_EXPECTED: Final = ErrorMessage("Return statement in function which does not return")
 INVALID_EXCEPTION: Final = ErrorMessage("Exception must be derived from BaseException")
-INVALID_EXCEPTION_TYPE: Final = ErrorMessage("Exception type must be derived from BaseException")
+INVALID_EXCEPTION_TYPE: Final = ErrorMessage(
+    "Exception type must be derived from BaseException (or be a tuple of exception classes)"
+)
 INVALID_EXCEPTION_GROUP: Final = ErrorMessage(
     "Exception type in except* cannot derive from BaseExceptionGroup"
 )
@@ -268,6 +270,7 @@ CLASS_PATTERN_KEYWORD_MATCHES_POSITIONAL: Final = (
 )
 CLASS_PATTERN_DUPLICATE_KEYWORD_PATTERN: Final = 'Duplicate keyword pattern "{}"'
 CLASS_PATTERN_UNKNOWN_KEYWORD: Final = 'Class "{}" has no attribute "{}"'
+CLASS_PATTERN_CLASS_OR_STATIC_METHOD: Final = "Cannot have both classmethod and staticmethod"
 MULTIPLE_ASSIGNMENTS_IN_PATTERN: Final = 'Multiple assignments to name "{}" in pattern'
 CANNOT_MODIFY_MATCH_ARGS: Final = 'Cannot assign to "__match_args__"'
 
