@@ -155,12 +155,9 @@ from mypy.types import (
     get_proper_type,
     get_proper_types,
     has_recursive_types,
-    is_generic_instance,
     is_named_instance,
-    is_optional,
-    is_self_type_like,
-    remove_optional,
 )
+from mypy.types_utils import is_generic_instance, is_optional, is_self_type_like, remove_optional
 from mypy.typestate import type_state
 from mypy.typevars import fill_typevars
 from mypy.typevartuples import find_unpack_in_list
@@ -2057,7 +2054,7 @@ class ExpressionChecker(ExpressionVisitor[Type]):
                 if (
                     isinstance(first_actual_arg_type, TupleType)
                     and len(first_actual_arg_type.items) == 1
-                    and isinstance(get_proper_type(first_actual_arg_type.items[0]), UnpackType)
+                    and isinstance(first_actual_arg_type.items[0], UnpackType)
                 ):
                     # TODO: use walrus operator
                     actual_types = [first_actual_arg_type.items[0]] + [
@@ -2084,7 +2081,7 @@ class ExpressionChecker(ExpressionVisitor[Type]):
                             callee_arg_types = unpacked_type.items
                             callee_arg_kinds = [ARG_POS] * len(actuals)
                         else:
-                            inner_unpack = get_proper_type(unpacked_type.items[inner_unpack_index])
+                            inner_unpack = unpacked_type.items[inner_unpack_index]
                             assert isinstance(inner_unpack, UnpackType)
                             inner_unpacked_type = get_proper_type(inner_unpack.type)
                             # We assume heterogenous tuples are desugared earlier
