@@ -995,18 +995,13 @@ def process_options(
         help="Use a custom typing module",
     )
     internals_group.add_argument(
-        "--new-type-inference",
+        "--old-type-inference",
         action="store_true",
-        help="Enable new experimental type inference algorithm",
-    )
-    internals_group.add_argument(
-        "--disable-recursive-aliases",
-        action="store_true",
-        help="Disable experimental support for recursive type aliases",
+        help="Disable new experimental type inference algorithm",
     )
     # Deprecated reverse variant of the above.
     internals_group.add_argument(
-        "--enable-recursive-aliases", action="store_true", help=argparse.SUPPRESS
+        "--new-type-inference", action="store_true", help=argparse.SUPPRESS
     )
     parser.add_argument(
         "--enable-incomplete-feature",
@@ -1392,11 +1387,12 @@ def process_options(
     if options.logical_deps:
         options.cache_fine_grained = True
 
-    if options.enable_recursive_aliases:
+    if options.new_type_inference:
         print(
-            "Warning: --enable-recursive-aliases is deprecated;"
-            " recursive types are enabled by default"
+            "Warning: --new-type-inference flag is deprecated;"
+            " new type inference algorithm is already enabled by default"
         )
+
     if options.strict_concatenate and not strict_option_set:
         print("Warning: --strict-concatenate is deprecated; use --extra-checks instead")
 
