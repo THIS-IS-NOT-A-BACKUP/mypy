@@ -791,9 +791,21 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
             if impl_type is not None:
                 assert defn.impl is not None
 
+                # This is what we want from implementation, it should accept all arguments
+                # of an overload, but the return types should go the opposite way.
+                if is_callable_compatible(
+                    impl_type,
+                    sig1,
+                    is_compat=is_subtype,
+                    is_proper_subtype=False,
+                    is_compat_return=lambda l, r: is_subtype(r, l),
+                ):
+                    continue
+                # If the above check didn't work, we repeat some key steps in
+                # is_callable_compatible() to give a better error message.
+
                 # We perform a unification step that's very similar to what
-                # 'is_callable_compatible' would have done if we had set
-                # 'unify_generics' to True -- the only difference is that
+                # 'is_callable_compatible' does -- the only difference is that
                 # we check and see if the impl_type's return value is a
                 # *supertype* of the overload alternative, not a *subtype*.
                 #
@@ -2243,6 +2255,7 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         if fail:
             emitted_msg = False
 
+            offset_arguments = isinstance(override, CallableType) and override.unpack_kwargs
             # Normalize signatures, so we get better diagnostics.
             if isinstance(override, (CallableType, Overloaded)):
                 override = override.with_unpacked_kwargs()
@@ -2273,12 +2286,23 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
                 def erase_override(t: Type) -> Type:
                     return erase_typevars(t, ids_to_erase=override_ids)
 
-                for i in range(len(override.arg_types)):
-                    if not is_subtype(
-                        original.arg_types[i], erase_override(override.arg_types[i])
-                    ):
-                        arg_type_in_super = original.arg_types[i]
-
+                for i, (sub_kind, super_kind) in enumerate(
+                    zip(override.arg_kinds, original.arg_kinds)
+                ):
+                    if sub_kind.is_positional() and super_kind.is_positional():
+                        override_arg_type = override.arg_types[i]
+                        original_arg_type = original.arg_types[i]
+                    elif sub_kind.is_named() and super_kind.is_named() and not offset_arguments:
+                        arg_name = override.arg_names[i]
+                        if arg_name in original.arg_names:
+                            override_arg_type = override.arg_types[i]
+                            original_i = original.arg_names.index(arg_name)
+                            original_arg_type = original.arg_types[original_i]
+                        else:
+                            continue
+                    else:
+                        continue
+                    if not is_subtype(original_arg_type, erase_override(override_arg_type)):
                         if isinstance(node, FuncDef) and not node.is_property:
                             context: Context = node.arguments[i + len(override.bound_args)]
                         else:
@@ -2288,7 +2312,7 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
                             name,
                             type_name,
                             name_in_super,
-                            arg_type_in_super,
+                            original_arg_type,
                             supertype,
                             context,
                             secondary_context=node,
