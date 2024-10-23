@@ -1072,46 +1072,7 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         if defn.original_def:
             # Override previous definition.
             new_type = self.function_type(defn)
-            if isinstance(defn.original_def, FuncDef):
-                # Function definition overrides function definition.
-                old_type = self.function_type(defn.original_def)
-                if not is_same_type(new_type, old_type):
-                    self.msg.incompatible_conditional_function_def(defn, old_type, new_type)
-            else:
-                # Function definition overrides a variable initialized via assignment or a
-                # decorated function.
-                orig_type = defn.original_def.type
-                if orig_type is None:
-                    # If other branch is unreachable, we don't type check it and so we might
-                    # not have a type for the original definition
-                    return
-                if isinstance(orig_type, PartialType):
-                    if orig_type.type is None:
-                        # Ah this is a partial type. Give it the type of the function.
-                        orig_def = defn.original_def
-                        if isinstance(orig_def, Decorator):
-                            var = orig_def.var
-                        else:
-                            var = orig_def
-                        partial_types = self.find_partial_types(var)
-                        if partial_types is not None:
-                            var.type = new_type
-                            del partial_types[var]
-                    else:
-                        # Trying to redefine something like partial empty list as function.
-                        self.fail(message_registry.INCOMPATIBLE_REDEFINITION, defn)
-                else:
-                    name_expr = NameExpr(defn.name)
-                    name_expr.node = defn.original_def
-                    self.binder.assign_type(name_expr, new_type, orig_type)
-                    self.check_subtype(
-                        new_type,
-                        orig_type,
-                        defn,
-                        message_registry.INCOMPATIBLE_REDEFINITION,
-                        "redefinition with type",
-                        "original type",
-                    )
+            self.check_func_def_override(defn, new_type)
 
     def check_func_item(
         self,
@@ -1146,6 +1107,49 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         if name == "__post_init__":
             if dataclasses_plugin.is_processed_dataclass(defn.info):
                 dataclasses_plugin.check_post_init(self, defn, defn.info)
+
+    def check_func_def_override(self, defn: FuncDef, new_type: FunctionLike) -> None:
+        assert defn.original_def is not None
+        if isinstance(defn.original_def, FuncDef):
+            # Function definition overrides function definition.
+            old_type = self.function_type(defn.original_def)
+            if not is_same_type(new_type, old_type):
+                self.msg.incompatible_conditional_function_def(defn, old_type, new_type)
+        else:
+            # Function definition overrides a variable initialized via assignment or a
+            # decorated function.
+            orig_type = defn.original_def.type
+            if orig_type is None:
+                # If other branch is unreachable, we don't type check it and so we might
+                # not have a type for the original definition
+                return
+            if isinstance(orig_type, PartialType):
+                if orig_type.type is None:
+                    # Ah this is a partial type. Give it the type of the function.
+                    orig_def = defn.original_def
+                    if isinstance(orig_def, Decorator):
+                        var = orig_def.var
+                    else:
+                        var = orig_def
+                    partial_types = self.find_partial_types(var)
+                    if partial_types is not None:
+                        var.type = new_type
+                        del partial_types[var]
+                else:
+                    # Trying to redefine something like partial empty list as function.
+                    self.fail(message_registry.INCOMPATIBLE_REDEFINITION, defn)
+            else:
+                name_expr = NameExpr(defn.name)
+                name_expr.node = defn.original_def
+                self.binder.assign_type(name_expr, new_type, orig_type)
+                self.check_subtype(
+                    new_type,
+                    orig_type,
+                    defn,
+                    message_registry.INCOMPATIBLE_REDEFINITION,
+                    "redefinition with type",
+                    "original type",
+                )
 
     @contextmanager
     def enter_attribute_inference_context(self) -> Iterator[None]:
@@ -3171,6 +3175,14 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
                     # Don't use type binder for definitions of special forms, like named tuples.
                     if not (isinstance(lvalue, NameExpr) and lvalue.is_special_form):
                         self.binder.assign_type(lvalue, rvalue_type, lvalue_type, False)
+                        if (
+                            isinstance(lvalue, NameExpr)
+                            and isinstance(lvalue.node, Var)
+                            and lvalue.node.is_inferred
+                            and lvalue.node.is_index_var
+                            and lvalue_type is not None
+                        ):
+                            lvalue.node.type = remove_instance_last_known_values(lvalue_type)
 
             elif index_lvalue:
                 self.check_indexed_assignment(index_lvalue, rvalue, lvalue)
@@ -3180,6 +3192,7 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
                 rvalue_type = self.expr_checker.accept(rvalue, type_context=type_context)
                 if not (
                     inferred.is_final
+                    or inferred.is_index_var
                     or (isinstance(lvalue, NameExpr) and lvalue.name == "__match_args__")
                 ):
                     rvalue_type = remove_instance_last_known_values(rvalue_type)
@@ -5119,6 +5132,10 @@ class TypeChecker(NodeVisitor[None], CheckerPluginInterface):
         if e.func.info and e.func.name in ("__init__", "__new__"):
             if e.type and not isinstance(get_proper_type(e.type), (FunctionLike, AnyType)):
                 self.fail(message_registry.BAD_CONSTRUCTOR_TYPE, e)
+
+        if e.func.original_def and isinstance(sig, FunctionLike):
+            # Function definition overrides function definition.
+            self.check_func_def_override(e.func, sig)
 
     def check_for_untyped_decorator(
         self, func: FuncDef, dec_type: Type, dec_expr: Expression
