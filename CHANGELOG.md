@@ -4,7 +4,7 @@
 
 ...
 
-## Mypy 1.15 (Unreleased)
+## Mypy 1.15
 
 We’ve just uploaded mypy 1.15 to the Python Package Index ([PyPI](https://pypi.org/project/mypy/)).
 Mypy is a static type checker for Python. This release includes new features, performance
@@ -20,9 +20,11 @@ Mypy is up to 40% faster in some use cases. This improvement comes largely from 
 of the garbage collector. Additionally, the release includes several micro-optimizations that may
 be impactful for large projects.
 
-Contributed by Jukka Lehtosalo (PR [18306](https://github.com/python/mypy/pull/18306),
-PR [18302](https://github.com/python/mypy/pull/18302, PR [18298](https://github.com/python/mypy/pull/18298,
-PR [18299](https://github.com/python/mypy/pull/18299).
+Contributed by Jukka Lehtosalo
+- PR [18306](https://github.com/python/mypy/pull/18306)
+- PR [18302](https://github.com/python/mypy/pull/18302)
+- PR [18298](https://github.com/python/mypy/pull/18298)
+- PR [18299](https://github.com/python/mypy/pull/18299)
 
 ### Mypyc Accelerated Mypy Wheels for ARM Linux
 
