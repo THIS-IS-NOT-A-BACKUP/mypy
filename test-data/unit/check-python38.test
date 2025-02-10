@@ -385,8 +385,7 @@ reveal_type(z2)  # E: Name "z2" is not defined  # N: Revealed type is "Any"
 [builtins fixtures/isinstancelist.pyi]
 
 [case testWalrusConditionalTypeBinder]
-from typing import Tuple, Union
-from typing_extensions import Literal
+from typing import Literal, Tuple, Union
 
 class Good:
     @property
@@ -469,8 +468,7 @@ reveal_type(x)  # N: Revealed type is "Literal[0]"
 
 [case testWalrusAssignmentAndConditionScopeForProperty]
 # flags: --warn-unreachable
-
-from typing_extensions import Literal
+from typing import Literal
 
 class PropertyWrapper:
     @property
@@ -497,8 +495,7 @@ reveal_type(y)  # N: Revealed type is "Literal[False]"
 
 [case testWalrusAssignmentAndConditionScopeForFunction]
 # flags: --warn-unreachable
-
-from typing_extensions import Literal
+from typing import Literal
 
 def f() -> str: ...
 
@@ -678,7 +675,8 @@ main:16: note:     def foo(cls, float, /) -> Any
 main:16: note:     def foo(cls, a: str) -> Any
 
 [case testUnpackWithDuplicateNamePositionalOnly]
-from typing_extensions import Unpack, TypedDict
+from typing import TypedDict
+from typing_extensions import Unpack
 
 class Person(TypedDict):
     name: str
@@ -686,6 +684,7 @@ class Person(TypedDict):
 def foo(name: str, /, **kwargs: Unpack[Person]) -> None:  # Allowed
     ...
 [builtins fixtures/dict.pyi]
+[typing fixtures/typing-typeddict.pyi]
 
 [case testPossiblyUndefinedWithAssignmentExpr]
 # flags: --enable-error-code possibly-undefined
