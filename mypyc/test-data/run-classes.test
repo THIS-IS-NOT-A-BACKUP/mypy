@@ -711,8 +711,7 @@ Traceback (most recent call last):
 AttributeError: attribute 'x' of 'X' undefined
 
 [case testClassMethods]
-from typing import ClassVar, Any
-from typing_extensions import final
+from typing import ClassVar, Any, final
 from mypy_extensions import mypyc_attr
 
 from interp import make_interpreted_subclass
@@ -1069,7 +1068,7 @@ assert b.z is None
 assert not hasattr(b, 'bogus')
 
 [case testProtocol]
-from typing_extensions import Protocol
+from typing import Protocol
 
 class Proto(Protocol):
     def foo(self, x: int) -> None:
@@ -2543,7 +2542,7 @@ class Derived(Base):
 assert Derived()() == 1
 
 [case testClassWithFinalAttribute]
-from typing_extensions import Final
+from typing import Final
 
 class C:
     A: Final = -1
