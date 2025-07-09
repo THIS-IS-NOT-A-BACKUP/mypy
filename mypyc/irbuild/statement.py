@@ -90,6 +90,7 @@ from mypyc.irbuild.nonlocalcontrol import (
     FinallyNonlocalControl,
     TryFinallyNonlocalControl,
 )
+from mypyc.irbuild.prepare import GENERATOR_HELPER_NAME
 from mypyc.irbuild.targets import (
     AssignmentTarget,
     AssignmentTargetAttr,
@@ -784,7 +785,7 @@ def transform_with(
             args = [none, none, none]
 
         if is_native:
-            assert isinstance(mgr_v.type, RInstance)
+            assert isinstance(mgr_v.type, RInstance), mgr_v.type
             exit_val = builder.gen_method_call(
                 builder.read(mgr),
                 f"__{al}exit__",
@@ -933,7 +934,7 @@ def emit_yield_from_or_await(
     to_yield_reg = Register(object_rprimitive)
     received_reg = Register(object_rprimitive)
 
-    helper_method = "__mypyc_generator_helper__"
+    helper_method = GENERATOR_HELPER_NAME
     if (
         isinstance(val, (Call, MethodCall))
         and isinstance(val.type, RInstance)
