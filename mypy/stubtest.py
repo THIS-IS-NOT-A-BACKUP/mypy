@@ -34,6 +34,9 @@ from typing import Any, Final, Generic, TypeVar, Union
 from typing_extensions import get_origin, is_typeddict
 
 import mypy.build
+import mypy.checkexpr
+import mypy.checkmember
+import mypy.erasetype
 import mypy.modulefinder
 import mypy.nodes
 import mypy.state
@@ -506,13 +509,16 @@ def _is_disjoint_base(typ: type[object]) -> bool:
 def _verify_disjoint_base(
     stub: nodes.TypeInfo, runtime: type[object], object_path: list[str]
 ) -> Iterator[Error]:
-    # If it's final, doesn't matter whether it's a disjoint base or not
-    if stub.is_final:
-        return
     is_disjoint_runtime = _is_disjoint_base(runtime)
     # Don't complain about missing @disjoint_base if there are __slots__, because
     # in that case we can infer that it's a disjoint base.
-    if is_disjoint_runtime and not stub.is_disjoint_base and not runtime.__dict__.get("__slots__"):
+    if (
+        is_disjoint_runtime
+        and not stub.is_disjoint_base
+        and not runtime.__dict__.get("__slots__")
+        and not stub.is_final
+        and not (stub.is_enum and stub.enum_members)
+    ):
         yield Error(
             object_path,
             "is a disjoint base at runtime, but isn't marked with @disjoint_base in the stub",
@@ -520,14 +526,40 @@ def _verify_disjoint_base(
             runtime,
             stub_desc=repr(stub),
         )
-    elif not is_disjoint_runtime and stub.is_disjoint_base:
-        yield Error(
-            object_path,
-            "is marked with @disjoint_base in the stub, but isn't a disjoint base at runtime",
-            stub,
-            runtime,
-            stub_desc=repr(stub),
-        )
+    elif stub.is_disjoint_base:
+        if not is_disjoint_runtime:
+            yield Error(
+                object_path,
+                "is marked with @disjoint_base in the stub, but isn't a disjoint base at runtime",
+                stub,
+                runtime,
+                stub_desc=repr(stub),
+            )
+        if runtime.__dict__.get("__slots__"):
+            yield Error(
+                object_path,
+                "is marked as @disjoint_base, but also has slots; add __slots__ instead",
+                stub,
+                runtime,
+                stub_desc=repr(stub),
+            )
+        elif stub.is_final:
+            yield Error(
+                object_path,
+                "is marked as @disjoint_base, but also marked as @final; remove @disjoint_base",
+                stub,
+                runtime,
+                stub_desc=repr(stub),
+            )
+        elif stub.is_enum and stub.enum_members:
+            yield Error(
+                object_path,
+                "is marked as @disjoint_base, but is an enum with members, which is implicitly final; "
+                "remove @disjoint_base",
+                stub,
+                runtime,
+                stub_desc=repr(stub),
+            )
 
 
 def _verify_metaclass(
@@ -763,7 +795,11 @@ def _verify_arg_default_value(
                 "has a default value but stub parameter does not"
             )
         else:
-            runtime_type = get_mypy_type_of_runtime_value(runtime_arg.default)
+            type_context = stub_arg.variable.type
+            runtime_type = get_mypy_type_of_runtime_value(
+                runtime_arg.default, type_context=type_context
+            )
+
             # Fallback to the type annotation type if var type is missing. The type annotation
             # is an UnboundType, but I don't know enough to know what the pros and cons here are.
             # UnboundTypes have ugly question marks following them, so default to var type.
@@ -925,6 +961,22 @@ class Signature(Generic[T]):
         # For most dunder methods, just assume all args are positional-only
         assume_positional_only = is_dunder(stub.name, exclude_special=True)
 
+        is_arg_pos_only: defaultdict[str, set[bool]] = defaultdict(set)
+        for func in map(_resolve_funcitem_from_decorator, stub.items):
+            assert func is not None, "Failed to resolve decorated overload"
+            args = maybe_strip_cls(stub.name, func.arguments)
+            for index, arg in enumerate(args):
+                if (
+                    arg.variable.name.startswith("__")
+                    or arg.pos_only
+                    or assume_positional_only
+                    or arg.variable.name.strip("_") == "self"
+                    or (index == 0 and arg.variable.name.strip("_") == "cls")
+                ):
+                    is_arg_pos_only[arg.variable.name].add(True)
+                else:
+                    is_arg_pos_only[arg.variable.name].add(False)
+
         all_args: dict[str, list[tuple[nodes.Argument, int]]] = {}
         for func in map(_resolve_funcitem_from_decorator, stub.items):
             assert func is not None, "Failed to resolve decorated overload"
@@ -932,15 +984,13 @@ class Signature(Generic[T]):
             for index, arg in enumerate(args):
                 # For positional-only args, we allow overloads to have different names for the same
                 # argument. To accomplish this, we just make up a fake index-based name.
-                name = (
-                    f"__{index}"
-                    if arg.variable.name.startswith("__")
-                    or arg.pos_only
-                    or assume_positional_only
-                    or arg.variable.name.strip("_") == "self"
-                    or (index == 0 and arg.variable.name.strip("_") == "cls")
-                    else arg.variable.name
-                )
+                # We can only use the index-based name if the argument is always
+                # positional only. Sometimes overloads have an arg as positional-only
+                # in some but not all branches of the overload.
+                name = arg.variable.name
+                if is_arg_pos_only[name] == {True}:
+                    name = f"__{index}"
+
                 all_args.setdefault(name, []).append((arg, index))
 
         def get_position(arg_name: str) -> int:
@@ -1204,7 +1254,7 @@ def verify_var(
     ):
         yield Error(object_path, "is read-only at runtime but not in the stub", stub, runtime)
 
-    runtime_type = get_mypy_type_of_runtime_value(runtime)
+    runtime_type = get_mypy_type_of_runtime_value(runtime, type_context=stub.type)
     if (
         runtime_type is not None
         and stub.type is not None
@@ -1789,7 +1839,18 @@ def is_subtype_helper(left: mypy.types.Type, right: mypy.types.Type) -> bool:
         return mypy.subtypes.is_subtype(left, right)
 
 
-def get_mypy_type_of_runtime_value(runtime: Any) -> mypy.types.Type | None:
+def get_mypy_node_for_name(module: str, type_name: str) -> mypy.nodes.SymbolNode | None:
+    stub = get_stub(module)
+    if stub is None:
+        return None
+    if type_name not in stub.names:
+        return None
+    return stub.names[type_name].node
+
+
+def get_mypy_type_of_runtime_value(
+    runtime: Any, type_context: mypy.types.Type | None = None
+) -> mypy.types.Type | None:
     """Returns a mypy type object representing the type of ``runtime``.
 
     Returns None if we can't find something that works.
@@ -1850,14 +1911,45 @@ def get_mypy_type_of_runtime_value(runtime: Any) -> mypy.types.Type | None:
             is_ellipsis_args=True,
         )
 
-    # Try and look up a stub for the runtime object
-    stub = get_stub(type(runtime).__module__)
-    if stub is None:
+    skip_type_object_type = False
+    if type_context:
+        # Don't attempt to process the type object when context is generic
+        # This is related to issue #3737
+        type_context = mypy.types.get_proper_type(type_context)
+        # Callable types with a generic return value
+        if isinstance(type_context, mypy.types.CallableType):
+            if isinstance(type_context.ret_type, mypy.types.TypeVarType):
+                skip_type_object_type = True
+        # Type[x] where x is generic
+        if isinstance(type_context, mypy.types.TypeType):
+            if isinstance(type_context.item, mypy.types.TypeVarType):
+                skip_type_object_type = True
+
+    if isinstance(runtime, type) and not skip_type_object_type:
+
+        def _named_type(name: str) -> mypy.types.Instance:
+            parts = name.rsplit(".", maxsplit=1)
+            node = get_mypy_node_for_name(parts[0], parts[1])
+            assert isinstance(node, nodes.TypeInfo)
+            any_type = mypy.types.AnyType(mypy.types.TypeOfAny.special_form)
+            return mypy.types.Instance(node, [any_type] * len(node.defn.type_vars))
+
+        # Try and look up a stub for the runtime object itself
+        # The logic here is similar to ExpressionChecker.analyze_ref_expr
+        type_info = get_mypy_node_for_name(runtime.__module__, runtime.__name__)
+        if isinstance(type_info, nodes.TypeInfo):
+            result: mypy.types.Type | None = None
+            result = mypy.typeops.type_object_type(type_info, _named_type)
+            if mypy.checkexpr.is_type_type_context(type_context):
+                # This is the type in a type[] expression, so substitute type
+                # variables with Any.
+                result = mypy.erasetype.erase_typevars(result)
+            return result
+
+    # Try and look up a stub for the runtime object's type
+    type_info = get_mypy_node_for_name(type(runtime).__module__, type(runtime).__name__)
+    if type_info is None:
         return None
-    type_name = type(runtime).__name__
-    if type_name not in stub.names:
-        return None
-    type_info = stub.names[type_name].node
     if isinstance(type_info, nodes.Var):
         return type_info.type
     if not isinstance(type_info, nodes.TypeInfo):
