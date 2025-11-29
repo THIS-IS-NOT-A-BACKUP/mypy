@@ -12,8 +12,9 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Callable
 from types import TracebackType
-from typing import Callable, Final
+from typing import Final
 
 if sys.platform == "win32":
     # This may be private, but it is needed for IPC on Windows, and is basically stable
@@ -271,7 +272,7 @@ class IPCServer(IPCBase):
         else:
             try:
                 self.connection, _ = self.sock.accept()
-            except socket.timeout as e:
+            except TimeoutError as e:
                 raise IPCException("The socket timed out") from e
         return self
 

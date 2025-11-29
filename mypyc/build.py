@@ -26,7 +26,7 @@ import re
 import sys
 import time
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, Union, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
 
 import mypyc.build_setup  # noqa: F401
 from mypy.build import BuildSource
@@ -115,11 +115,11 @@ if TYPE_CHECKING:
         from setuptools import Extension
     else:
         from distutils.core import Extension as _distutils_Extension
-        from typing_extensions import TypeAlias
+        from typing import TypeAlias
 
         from setuptools import Extension as _setuptools_Extension
 
-        Extension: TypeAlias = Union[_setuptools_Extension, _distutils_Extension]
+        Extension: TypeAlias = _setuptools_Extension | _distutils_Extension
 
 if sys.version_info >= (3, 12):
     # From setuptools' monkeypatch
