@@ -7796,3 +7796,200 @@ tmp/b.py:5: note: "lol" of "BB" defined here
 [out2]
 tmp/a.py:2: error: Unexpected keyword argument "uhhhh" for "lol" of "BB"
 tmp/b.py:5: note: "lol" of "BB" defined here
+
+[case testMissingImportUnIgnoredInConfig]
+# flags: --config-file tmp/mypy.ini
+from foo import bar
+[file mypy.ini]
+\[mypy]
+\[mypy-foo]
+ignore_missing_imports = True
+[file mypy.ini.2]
+\[mypy]
+\[mypy-foo]
+ignore_missing_imports = False
+[out]
+[out2]
+main:2: error: Cannot find implementation or library stub for module named "foo"
+main:2: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports
+
+[case testMissingImportUnIgnoredInConfig2]
+# flags: --config-file tmp/mypy.ini
+from foo import bar
+[file mypy.ini]
+\[mypy]
+\[mypy-foo]
+ignore_missing_imports = False
+[file mypy.ini.2]
+\[mypy]
+\[mypy-foo]
+ignore_missing_imports = True
+[out]
+main:2: error: Cannot find implementation or library stub for module named "foo"
+main:2: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports
+[out2]
+
+[case testMissingImportUnIgnoredInConfig3]
+# flags: --config-file tmp/mypy.ini
+from foo import bar
+[file foo.py]
+bar = 1
+[file mypy.ini]
+\[mypy]
+\[mypy-foo]
+follow_imports = skip
+[file mypy.ini.2]
+\[mypy]
+\[mypy-foo]
+follow_imports = error
+[out]
+[out2]
+main:2: error: Import of "foo" ignored
+main:2: note: (Using --follow-imports=error, module not passed on command line)
+
+[case testMissingImportUnIgnoredInConfig4]
+# flags: --config-file tmp/mypy.ini
+from foo import bar
+[file foo.py]
+bar = 1
+[file mypy.ini]
+\[mypy]
+\[mypy-foo]
+follow_imports = error
+[file mypy.ini.2]
+\[mypy]
+\[mypy-foo]
+follow_imports = skip
+[out]
+main:2: error: Import of "foo" ignored
+main:2: note: (Using --follow-imports=error, module not passed on command line)
+[out2]
+
+[case testMissingImportUnIgnoredInConfig5]
+# flags: --config-file tmp/mypy.ini --warn-unused-ignores
+from foo import bar  # type: ignore[import-not-found]
+[file mypy.ini]
+\[mypy]
+\[mypy-foo]
+ignore_missing_imports = True
+[file mypy.ini.2]
+\[mypy]
+\[mypy-foo]
+ignore_missing_imports = False
+[out]
+main:2: error: Unused "type: ignore" comment
+[out2]
+
+[case testMissingImportUnIgnoredInConfig6]
+# flags: --config-file tmp/mypy.ini  --warn-unused-ignores
+from foo import bar  # type: ignore[import-not-found]
+[file mypy.ini]
+\[mypy]
+\[mypy-foo]
+ignore_missing_imports = False
+[file mypy.ini.2]
+\[mypy]
+\[mypy-foo]
+ignore_missing_imports = True
+[out]
+[out2]
+main:2: error: Unused "type: ignore" comment
+
+[case testIndirectDependencyReorderModulesNoCrash]
+import a
+[file a.py]
+import b
+[file a.py.2]
+import pkg.mod
+import b
+[file b.py]
+import foo
+import pkg
+x: pkg.mod.C
+[file pkg/__init__.py]
+[file pkg/mod.py]
+import c
+class C: ...
+# The chain of trivial stale modules is to force late load of pkg.mod,
+# otherwise the test can pass accidentally.
+[file c.py]
+import d
+[file c.py.2]
+import d  # touch
+[file d.py]
+import e
+[file d.py.2]
+import e  # touch
+[file e.py]
+[file foo.py]
+import bar
+[file bar.py]
+import pkg.mod
+[file bar.py.2]
+[out]
+[out2]
+tmp/b.py:3: error: Name "pkg.mod.C" is not defined
+
+[case testIndirectDependencyReorderModulesNoCrash2]
+import m
+[file m.py]
+import a
+[file m.py.2]
+import a
+import d
+[file a.py]
+import b
+x: b.c.d.C
+[file b.py]
+import c
+[file c.py]
+import d
+[file c.py.2]
+[file d.py]
+import n1
+class C: ...
+# The chain of trivial stale modules is to force late load of d,
+# otherwise the test can pass accidentally.
+[file n1.py]
+import n2
+[file n1.py.2]
+import n2  # touch
+[file n2.py]
+import n3
+[file n2.py.2]
+import n3  # touch
+[file n3.py]
+[out]
+[out2]
+tmp/a.py:2: error: Name "b.c.d.C" is not defined
+
+[case testDeletedModuleFromImport]
+# flags: --ignore-missing-imports
+from a import b
+[file a/__init__.py]
+[file a/b.py]
+[delete a/b.py.2]
+[out]
+[out2]
+main:2: error: Module "a" has no attribute "b"
+
+[case testDeletedModuleFromImport2]
+# flags: --ignore-missing-imports
+import a
+import a.b
+from a import b  # no error here
+[file a/__init__.py]
+[file a/b.py]
+[delete a/b.py.2]
+[out]
+[out2]
+
+[case testDeletedModuleFromImport3]
+# flags: --warn-unused-ignores
+from a import b  # type: ignore[attr-defined]
+[file a/__init__.py]
+[file a/b.py]
+[delete a/b.py.2]
+[out]
+main:2: error: Unused "type: ignore" comment
+[out2]

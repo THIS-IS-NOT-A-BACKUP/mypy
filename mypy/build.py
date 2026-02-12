@@ -94,7 +94,7 @@ from mypy.errors import (
     ErrorTupleRaw,
     report_internal_error,
 )
-from mypy.graph_utils import prepare_sccs, strongly_connected_components, topsort
+from mypy.graph_utils import prepare_sccs, strongly_connected_components, topsort2
 from mypy.indirection import TypeIndirectionVisitor
 from mypy.ipc import BadStatus, IPCClient, IPCMessage, read_status, ready_to_read, receive, send
 from mypy.messages import MessageBuilder
@@ -870,6 +870,9 @@ class BuildManager:
         # Mapping from SCC id to corresponding SCC instance. This is populated
         # in process_graph().
         self.scc_by_id: dict[int, SCC] = {}
+        # Mapping from module id to the SCC it belongs to. This is populated
+        # in process_graph().
+        self.scc_by_mod_id: dict[str, SCC] = {}
         # Global topological order for SCCs. This exists to make order of processing
         # SCCs more predictable.
         self.top_order: list[int] = []
@@ -892,6 +895,11 @@ class BuildManager:
         # raw parsed trees not analyzed with mypy. We use these to find absolute
         # location of a symbol used as a location for an error message.
         self.extra_trees: dict[str, MypyFile] = {}
+        # Snapshot of import-related options per module. We record these even for
+        # suppressed imports, since they can affect errors in the callers.
+        self.import_options: dict[str, dict[str, object]] = {}
+        # Cache for transitive dependency check (expensive).
+        self.transitive_deps_cache: dict[tuple[int, int], bool] = {}
 
     def dump_stats(self) -> None:
         if self.options.dump_build_stats:
@@ -1202,6 +1210,35 @@ class BuildManager:
             bool(self.scc_queue) or len(self.free_workers) < len(self.workers),
             results,
         )
+
+    def is_transitive_scc_dep(self, from_scc_id: int, to_scc_id: int) -> bool:
+        """Check if one SCC is a (transitive) dependency of another."""
+        edge = (from_scc_id, to_scc_id)
+        if (cached := self.transitive_deps_cache.get(edge)) is not None:
+            return cached
+        todo = self.scc_by_id[from_scc_id].deps
+        seen = set()
+        while todo:
+            more = set()
+            # Breadth-first search seems to be better here, because all
+            # "lower-level" SCCs are processed and some may be cached.
+            for dep in todo:
+                seen.add(dep)
+                if dep == to_scc_id:
+                    self.transitive_deps_cache[edge] = True
+                    return True
+                if cached := self.transitive_deps_cache.get((dep, to_scc_id)):
+                    self.transitive_deps_cache[edge] = True
+                    return True
+                elif cached is None:
+                    more |= self.scc_by_id[dep].deps
+            todo = more
+        self.transitive_deps_cache[edge] = False
+        for dep in seen:
+            # We negative-cache all intermediate lookups, thus
+            # trading time for space.
+            self.transitive_deps_cache[(dep, to_scc_id)] = False
+        return False
 
 
 def deps_to_json(x: dict[str, set[str]]) -> bytes:
@@ -1837,10 +1874,12 @@ def write_cache(
     tree: MypyFile,
     dependencies: list[str],
     suppressed: list[str],
+    suppressed_deps_opts: bytes,
     imports_ignored: dict[int, list[str]],
     dep_prios: list[int],
     dep_lines: list[int],
     old_interface_hash: bytes,
+    trans_dep_hash: bytes,
     source_hash: str,
     ignore_all: bool,
     manager: BuildManager,
@@ -1954,9 +1993,11 @@ def write_cache(
         suppressed=suppressed,
         imports_ignored=imports_ignored,
         options=options_snapshot(id, manager),
+        suppressed_deps_opts=suppressed_deps_opts,
         dep_prios=dep_prios,
         dep_lines=dep_lines,
         interface_hash=interface_hash,
+        trans_dep_hash=trans_dep_hash,
         version_id=manager.version_id,
         ignore_all=ignore_all,
         plugin_data=plugin_data,
@@ -2175,6 +2216,12 @@ class State:
     # Contains a hash of the public interface in incremental mode
     interface_hash: bytes = b""
 
+    # Hash of import structure that this module depends on. It is not 1:1 with
+    # transitive dependencies set, but if two hashes are equal, transitive
+    # dependencies are guaranteed to be identical. Some expensive checks can be
+    # skipped if this value is unchanged for a module.
+    trans_dep_hash: bytes = b""
+
     # Options, specialized for this file
     options: Options
 
@@ -2232,6 +2279,7 @@ class State:
             import_context = []
         id = id or "__main__"
         options = manager.options.clone_for_module(id)
+        manager.import_options[id] = options.dep_import_options()
 
         ignore_all = False
         if not path and source is None:
@@ -2322,7 +2370,7 @@ class State:
             if temporary:
                 state.load_tree(temporary=True)
             if not manager.use_fine_grained_cache():
-                # Special case: if there were a previously missing package imported here
+                # Special case: if there were a previously missing package imported here,
                 # and it is not present, then we need to re-calculate dependencies.
                 # This is to support patterns like this:
                 #     from missing_package import missing_module  # type: ignore
@@ -2330,9 +2378,19 @@ class State:
                 # (it may be a variable, a class, or a function), so it is not added to
                 # suppressed dependencies. Therefore, when the package with module is added,
                 # we need to re-calculate dependencies.
-                # NOTE: see comment below for why we skip this in fine grained mode.
-                if exist_added_packages(suppressed, manager, options):
+                # NOTE: see comment below for why we skip this in fine-grained mode.
+                if exist_added_packages(suppressed, manager):
                     state.parse_file()  # This is safe because the cache is anyway stale.
+                    state.compute_dependencies()
+                # This is an inverse to the situation above. If we had an import like this:
+                #     from pkg import mod
+                # and then mod was deleted, we need to force recompute dependencies, to
+                # decide whether we should still depend on a missing pkg.mod. Otherwise,
+                # the above import is indistinguishable from something like this:
+                #     import pkg
+                #     import pkg.mod
+                if exist_removed_submodules(dependencies, manager):
+                    state.parse_file()  # Same as above, the current state is stale anyway.
                     state.compute_dependencies()
             state.size_hint = meta.size
         else:
@@ -2350,6 +2408,7 @@ class State:
                 # We don't need parsed trees in coordinator process, we parse only to
                 # compute dependencies.
                 state.tree = None
+                del manager.ast_cache[id]
 
         return state
 
@@ -2528,7 +2587,16 @@ class State:
         # self.meta.dependencies when a dependency is dropped due to
         # suppression by silent mode.  However, when a suppressed
         # dependency is added back we find out later in the process.
-        return self.meta is not None and self.dependencies == self.meta.dependencies
+        # Additionally, we need to verify that import following options are
+        # same for suppressed dependencies, even if the first check is OK.
+        return (
+            self.meta is not None
+            and self.dependencies == self.meta.dependencies
+            and (
+                self.options.fine_grained_incremental
+                or self.meta.suppressed_deps_opts == self.suppressed_deps_opts()
+            )
+        )
 
     def mark_as_rechecked(self) -> None:
         """Marks this module as having been fully re-analyzed by the type-checker."""
@@ -2977,6 +3045,15 @@ class State:
             merge_dependencies(self.compute_fine_grained_deps(), deps)
             type_state.update_protocol_deps(deps)
 
+    def suppressed_deps_opts(self) -> bytes:
+        return json_dumps(
+            {
+                dep: self.manager.import_options[dep]
+                for dep in self.suppressed
+                if self.priorities.get(dep) != PRI_INDIRECT
+            }
+        )
+
     def write_cache(self) -> tuple[CacheMeta, str] | None:
         assert self.tree is not None, "Internal error: method must be called on parsed file only"
         # We don't support writing cache files in fine-grained incremental mode.
@@ -3008,10 +3085,12 @@ class State:
             self.tree,
             list(self.dependencies),
             list(self.suppressed),
+            self.suppressed_deps_opts(),
             self.imports_ignored,
             dep_prios,
             dep_lines,
             self.interface_hash,
+            self.trans_dep_hash,
             self.source_hash,
             self.ignore_all,
             self.manager,
@@ -3082,10 +3161,8 @@ class State:
             self.options.warn_unused_ignores
             or codes.UNUSED_IGNORE in self.options.enabled_error_codes
         ) and codes.UNUSED_IGNORE not in self.options.disabled_error_codes:
-            # If this file was initially loaded from the cache, it may have suppressed
-            # dependencies due to imports with ignores on them. We need to generate
-            # those errors to avoid spuriously flagging them as unused ignores.
-            if self.meta:
+            # We only need this for the daemon, regular incremental does this unconditionally.
+            if self.meta and self.options.fine_grained_incremental:
                 self.verify_dependencies(suppressed_only=True)
             self.manager.errors.generate_unused_ignore_errors(self.xpath)
 
@@ -3198,7 +3275,7 @@ def find_module_and_diagnose(
             raise ModuleNotFound
 
 
-def exist_added_packages(suppressed: list[str], manager: BuildManager, options: Options) -> bool:
+def exist_added_packages(suppressed: list[str], manager: BuildManager) -> bool:
     """Find if there are any newly added packages that were previously suppressed.
 
     Exclude everything not in build for follow-imports=skip.
@@ -3211,13 +3288,41 @@ def exist_added_packages(suppressed: list[str], manager: BuildManager, options: 
         path = find_module_simple(dep, manager)
         if not path:
             continue
-        if options.follow_imports == "skip" and (
+        options = manager.options.clone_for_module(dep)
+        # Technically this is not 100% correct, since we can have:
+        #     from pkg import mod
+        # with
+        #     [mypy-pkg]
+        #     follow-import = silent
+        #     [mypy-pkg.mod]
+        #     follow-imports = normal
+        # But such cases are extremely rare, and this allows us to avoid
+        # massive performance impact in much more common situations.
+        if options.follow_imports in ("skip", "error") and (
             not path.endswith(".pyi") or options.follow_imports_for_stubs
         ):
             continue
-        if "__init__.py" in path:
-            # It is better to have a bit lenient test, this will only slightly reduce
-            # performance, while having a too strict test may affect correctness.
+        if os.path.basename(path) in ("__init__.py", "__init__.pyi"):
+            return True
+    return False
+
+
+def exist_removed_submodules(dependencies: list[str], manager: BuildManager) -> bool:
+    """Find if there are any submodules of packages that are now missing.
+
+    This is conceptually an inverse of exist_added_packages().
+    """
+    dependencies_set = set(dependencies)
+    for dep in dependencies:
+        if "." not in dep:
+            continue
+        if dep in manager.source_set.source_modules:
+            # We still know it is definitely a module.
+            continue
+        direct_ancestor, _ = dep.rsplit(".", maxsplit=1)
+        if direct_ancestor not in dependencies_set:
+            continue
+        if find_module_simple(dep, manager) is None:
             return True
     return False
 
@@ -3666,20 +3771,22 @@ def load_graph(
         #   but A's cached *indirect* dependency on C is wrong.
         dependencies = [dep for dep in st.dependencies if st.priorities.get(dep) != PRI_INDIRECT]
         if not manager.use_fine_grained_cache():
-            # TODO: Ideally we could skip here modules that appeared in st.suppressed
-            # because they are not in build with `follow-imports=skip`.
-            # This way we could avoid overhead of cloning options in `State.__init__()`
-            # below to get the option value. This is quite minor performance loss however.
             added = [dep for dep in st.suppressed if find_module_simple(dep, manager)]
         else:
             # During initial loading we don't care about newly added modules,
             # they will be taken care of during fine-grained update. See also
-            # comment about this in `State.__init__()`.
+            # comment about this in `State.new_state()`.
             added = []
         for dep in st.ancestors + dependencies + st.suppressed:
             ignored = dep in st.suppressed_set and dep not in entry_points
             if ignored and dep not in added:
                 manager.missing_modules.add(dep)
+                # TODO: for now we skip this in the daemon as a performance optimization.
+                # This however creates a correctness issue, see #7777 and State.is_fresh().
+                if not manager.use_fine_grained_cache():
+                    manager.import_options[dep] = manager.options.clone_for_module(
+                        dep
+                    ).dep_import_options()
             elif dep not in graph:
                 try:
                     if dep in st.ancestors:
@@ -3740,6 +3847,7 @@ def load_graph(
         for dep in st.suppressed:
             if dep in graph:
                 st.add_dependency(dep)
+                manager.missing_modules.discard(dep)
     # Second, in the initial loop we skip indirect dependencies, so to make indirect dependencies
     # behave more consistently with regular ones, we suppress them manually here (when needed).
     for st in graph.values():
@@ -3774,6 +3882,27 @@ def order_ascc_ex(graph: Graph, ascc: SCC) -> list[str]:
     return scc
 
 
+def verify_transitive_deps(ascc: SCC, graph: Graph, manager: BuildManager) -> str | None:
+    """Verify all indirect dependencies of this SCC are still reachable via direct ones.
+
+    Return first unreachable dependency id, or None.
+    """
+    for id in ascc.mod_ids:
+        st = graph[id]
+        assert st.meta is not None, "Must be called on fresh SCCs only"
+        if st.trans_dep_hash == st.meta.trans_dep_hash:
+            # Import graph unchanged, skip this module.
+            continue
+        for dep in st.dependencies:
+            if st.priorities.get(dep) == PRI_INDIRECT:
+                dep_scc_id = manager.scc_by_mod_id[dep].id
+                if dep_scc_id == ascc.id:
+                    continue
+                if not manager.is_transitive_scc_dep(ascc.id, dep_scc_id):
+                    return dep
+    return None
+
+
 def find_stale_sccs(
     sccs: list[SCC], graph: Graph, manager: BuildManager
 ) -> tuple[list[SCC], list[SCC]]:
@@ -3782,7 +3911,8 @@ def find_stale_sccs(
     Fresh SCCs are those where:
     * We have valid cache files for all modules in the SCC.
     * There are no changes in dependencies (files removed from/added to the build).
-    * The interface hashes of direct dependents matches those recorded in the cache.
+    * The interface hashes of dependencies matches those recorded in the cache.
+    * All indirect dependencies are still reachable via direct ones.
     The first and second conditions are verified by is_fresh().
     """
     stale_sccs = []
@@ -3799,6 +3929,15 @@ def find_stale_sccs(
                     stale_deps.add(dep)
         fresh = fresh and not stale_deps
 
+        # Verify the invariant that indirect dependencies are a subset of transitive direct
+        # dependencies. Note: the case where indirect dependency is removed from the graph
+        # completely is already handled above.
+        stale_indirect = None
+        if fresh:
+            stale_indirect = verify_transitive_deps(ascc, graph, manager)
+            if stale_indirect is not None:
+                fresh = False
+
         if fresh:
             fresh_msg = "fresh"
         elif stale_scc:
@@ -3807,8 +3946,11 @@ def find_stale_sccs(
                 fresh_msg += f" ({' '.join(sorted(stale_scc))})"
             if stale_deps:
                 fresh_msg += f" with stale deps ({' '.join(sorted(stale_deps))})"
-        else:
+        elif stale_deps:
             fresh_msg = f"stale due to deps ({' '.join(sorted(stale_deps))})"
+        else:
+            assert stale_indirect is not None
+            fresh_msg = f"stale due to stale indirect dep(s): first {stale_indirect}"
 
         scc_str = " ".join(ascc.mod_ids)
         if fresh:
@@ -3860,6 +4002,9 @@ def process_graph(graph: Graph, manager: BuildManager) -> None:
     scc_by_id = {scc.id: scc for scc in sccs}
     manager.scc_by_id = scc_by_id
     manager.top_order = [scc.id for scc in sccs]
+    for scc in sccs:
+        for mod_id in scc.mod_ids:
+            manager.scc_by_mod_id[mod_id] = scc
 
     # Broadcast SCC structure to the parallel workers, since they don't compute it.
     sccs_message = SccsDataMessage(sccs=sccs)
@@ -3876,12 +4021,12 @@ def process_graph(graph: Graph, manager: BuildManager) -> None:
 
     # Prime the ready list with leaf SCCs (that have no dependencies).
     ready = []
-    not_ready = []
+    not_ready = set()
     for scc in sccs:
         if not scc.deps:
             ready.append(scc)
         else:
-            not_ready.append(scc)
+            not_ready.add(scc)
 
     still_working = False
     while ready or not_ready or still_working:
@@ -3904,8 +4049,8 @@ def process_graph(graph: Graph, manager: BuildManager) -> None:
             # type-checking this is already done and results should be empty here.
             if not manager.workers:
                 assert not results
-            for id, (interface_cache, errors) in results.items():
-                new_hash = bytes.fromhex(interface_cache)
+            for id, (interface_hash, errors) in results.items():
+                new_hash = bytes.fromhex(interface_hash)
                 if new_hash != graph[id].interface_hash:
                     graph[id].mark_interface_stale()
                     graph[id].interface_hash = new_hash
@@ -3917,6 +4062,7 @@ def process_graph(graph: Graph, manager: BuildManager) -> None:
                 if not scc_by_id[dependent].not_ready_deps:
                     not_ready.remove(scc_by_id[dependent])
                     ready.append(scc_by_id[dependent])
+    manager.trace(f"Transitive deps cache size: {sys.getsizeof(manager.transitive_deps_cache)}")
 
 
 def order_ascc(graph: Graph, ascc: AbstractSet[str], pri_max: int = PRI_INDIRECT) -> list[str]:
@@ -4047,6 +4193,9 @@ def process_stale_scc(
     t2 = time.time()
     stale = scc
     for id in stale:
+        # Re-generate import errors in case this module was loaded from the cache.
+        if graph[id].meta:
+            graph[id].verify_dependencies(suppressed_only=True)
         # We may already have parsed the module, or not.
         # If the former, parse_file() is a no-op.
         graph[id].parse_file()
@@ -4154,7 +4303,7 @@ def sorted_components(graph: Graph) -> list[SCC]:
     scc_dep_map = prepare_sccs_full(strongly_connected_components(vertices, edges), edges)
     # Topsort.
     res = []
-    for ready in topsort(scc_dep_map):
+    for ready in topsort2(scc_dep_map):
         # Sort the sets in ready by reversed smallest State.order.  Examples:
         #
         # - If ready is [{x}, {y}], x.order == 1, y.order == 2, we get
@@ -4168,6 +4317,11 @@ def sorted_components(graph: Graph) -> list[SCC]:
             scc.size_hint = sum(graph[mid].size_hint for mid in scc.mod_ids)
             for dep in scc_dep_map[scc]:
                 dep.direct_dependents.append(scc.id)
+            # We compute dependencies hash here since we know no direct
+            # dependencies will be added or suppressed after this point.
+            trans_dep_hash = transitive_dep_hash(scc, graph)
+            for id in scc.mod_ids:
+                graph[id].trans_dep_hash = trans_dep_hash
         res.extend(sorted_ready)
     return res
 
@@ -4184,7 +4338,7 @@ def sorted_components_inner(
     edges = {id: deps_filtered(graph, vertices, id, pri_max) for id in vertices}
     sccs = list(strongly_connected_components(vertices, edges))
     res = []
-    for ready in topsort(prepare_sccs(sccs, edges)):
+    for ready in topsort2(prepare_sccs(sccs, edges)):
         res.extend(sorted(ready, key=lambda scc: -min(graph[id].order for id in scc)))
     return res
 
@@ -4199,6 +4353,21 @@ def deps_filtered(graph: Graph, vertices: AbstractSet[str], id: str, pri_max: in
         for dep in state.dependencies
         if dep in vertices and state.priorities.get(dep, PRI_HIGH) < pri_max
     ]
+
+
+def transitive_dep_hash(scc: SCC, graph: Graph) -> bytes:
+    """Compute stable snapshot of transitive import structure for given SCC."""
+    all_direct_deps = {
+        dep
+        for id in scc.mod_ids
+        for dep in graph[id].dependencies
+        if graph[id].priorities.get(dep) != PRI_INDIRECT
+    }
+    trans_dep_hash_map = {
+        dep_id: "" if dep_id in scc.mod_ids else graph[dep_id].trans_dep_hash.hex()
+        for dep_id in all_direct_deps
+    }
+    return hash_digest_bytes(json_dumps(trans_dep_hash_map))
 
 
 def missing_stubs_file(cache_dir: str) -> str:
