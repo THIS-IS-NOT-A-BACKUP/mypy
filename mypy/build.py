@@ -13,7 +13,6 @@ The function build() is the main interface to this module.
 
 from __future__ import annotations
 
-import base64
 import collections
 import contextlib
 import gc
@@ -38,8 +37,10 @@ from typing import (
     TextIO,
     TypeAlias as _TypeAlias,
     TypedDict,
+    cast,
 )
 
+from librt.base64 import b64encode
 from librt.internal import (
     cache_version,
     read_bool,
@@ -47,6 +48,7 @@ from librt.internal import (
     read_str as read_str_bare,
     read_tag,
     write_bool,
+    write_bytes as write_bytes_bare,
     write_int as write_int_bare,
     write_str as write_str_bare,
     write_tag,
@@ -59,6 +61,7 @@ from mypy.cache import (
     LIST_GEN,
     LITERAL_NONE,
     CacheMeta,
+    JsonValue,
     ReadBuffer,
     SerializedError,
     Tag,
@@ -74,6 +77,7 @@ from mypy.cache import (
     write_int,
     write_int_list,
     write_int_opt,
+    write_json_value,
     write_str,
     write_str_list,
     write_str_opt,
@@ -94,7 +98,7 @@ from mypy.errors import (
     ErrorTupleRaw,
     report_internal_error,
 )
-from mypy.graph_utils import prepare_sccs, strongly_connected_components, topsort2
+from mypy.graph_utils import prepare_sccs, strongly_connected_components, topsort
 from mypy.indirection import TypeIndirectionVisitor
 from mypy.ipc import BadStatus, IPCClient, IPCMessage, read_status, ready_to_read, receive, send
 from mypy.messages import MessageBuilder
@@ -108,6 +112,7 @@ from mypy.nodes import (
     MypyFile,
     SymbolTable,
 )
+from mypy.options import OPTIONS_AFFECTING_CACHE_NO_PLATFORM
 from mypy.partially_defined import PossiblyUndefinedVariableVisitor
 from mypy.semanal import SemanticAnalyzer
 from mypy.semanal_pass1 import SemanticAnalyzerPreAnalysis
@@ -274,8 +279,11 @@ class WorkerClient:
                 pid, connection_name = data["pid"], data["connection_name"]
                 assert isinstance(pid, int), f"Bad PID: {pid}"
                 assert isinstance(connection_name, str), f"Bad connection name: {connection_name}"
-                # Double-check this status file is created by us.
-                assert pid == self.proc.pid, f"PID mismatch: {pid} vs {self.proc.pid}"
+                if sys.platform != "win32":
+                    # TODO(emmatyping): for some reason this does not work on Windows. Probably
+                    # because we don't fork? We should check this
+                    # Double-check this status file is created by us.
+                    assert pid == self.proc.pid, f"PID mismatch: {pid} vs {self.proc.pid}"
                 self.conn = IPCClient(connection_name, WORKER_CONNECTION_TIMEOUT)
                 return
             except Exception as exc:
@@ -353,7 +361,7 @@ def build(
     if options.num_workers > 0:
         # TODO: switch to something more efficient than pickle (also in the daemon).
         pickled_options = pickle.dumps(options.snapshot())
-        options_data = base64.b64encode(pickled_options).decode()
+        options_data = b64encode(pickled_options).decode()
         workers = [
             WorkerClient(f".mypy_worker.{idx}.json", options_data, worker_env or os.environ)
             for idx in range(options.num_workers)
@@ -813,6 +821,7 @@ class BuildManager:
             and not has_reporters
         )
         self.fscache = fscache
+        self.cwd = os.getcwd()
         self.find_module_cache = FindModuleCache(
             self.search_paths, self.fscache, self.options, source_set=self.source_set
         )
@@ -896,8 +905,9 @@ class BuildManager:
         # location of a symbol used as a location for an error message.
         self.extra_trees: dict[str, MypyFile] = {}
         # Snapshot of import-related options per module. We record these even for
-        # suppressed imports, since they can affect errors in the callers.
-        self.import_options: dict[str, dict[str, object]] = {}
+        # suppressed imports, since they can affect errors in the callers. Bytes
+        # value is opaque but can be compared to detect changes in options.
+        self.import_options: dict[str, bytes] = {}
         # Cache for transitive dependency check (expensive).
         self.transitive_deps_cache: dict[tuple[int, int], bool] = {}
 
@@ -1616,11 +1626,17 @@ def options_snapshot(id: str, manager: BuildManager) -> dict[str, object]:
     Separately store only the options we may compare individually, and take a hash
     of everything else. If --debug-cache is specified, fall back to full snapshot.
     """
-    snapshot = manager.options.clone_for_module(id).select_options_affecting_cache()
+    platform_opt, values = manager.options.clone_for_module(id).select_options_affecting_cache()
     if manager.options.debug_cache:
-        return snapshot
-    platform_opt = snapshot.pop("platform")
-    return {"platform": platform_opt, "other_options": hash_digest(json_dumps(snapshot))}
+        # Build full options snapshot for debugging purposes.
+        result: dict[str, object] = {"platform": platform_opt}
+        for key, val in zip(OPTIONS_AFFECTING_CACHE_NO_PLATFORM, values):
+            result[key] = val
+        return result
+    # Process most options quickly, since this is performance critical.
+    buf = WriteBuffer()
+    write_json_value(buf, cast(JsonValue, values))
+    return {"platform": platform_opt, "other_options": hash_digest(buf.getvalue())}
 
 
 def find_cache_meta(
@@ -2440,7 +2456,11 @@ class State:
         self.id = id
         self.path = path
         if path:
-            self.abspath = os.path.abspath(path)
+            # Avoid calling os.abspath, since it makes a getcwd() syscall, which is slow
+            if os.path.isabs(path):
+                self.abspath = path
+            else:
+                self.abspath = os.path.normpath(os.path.join(manager.cwd, path))
         self.xpath = path or "<string>"
         self.source = source
         self.options = options
@@ -3046,13 +3066,15 @@ class State:
             type_state.update_protocol_deps(deps)
 
     def suppressed_deps_opts(self) -> bytes:
-        return json_dumps(
-            {
-                dep: self.manager.import_options[dep]
-                for dep in self.suppressed
-                if self.priorities.get(dep) != PRI_INDIRECT
-            }
-        )
+        if not self.suppressed:
+            return b""
+        buf = WriteBuffer()
+        import_options = self.manager.import_options
+        for dep in sorted(self.suppressed):
+            if self.priorities.get(dep) != PRI_INDIRECT:
+                write_str_bare(buf, dep)
+                write_bytes_bare(buf, import_options[dep])
+        return buf.getvalue()
 
     def write_cache(self) -> tuple[CacheMeta, str] | None:
         assert self.tree is not None, "Internal error: method must be called on parsed file only"
@@ -3164,12 +3186,14 @@ class State:
             # We only need this for the daemon, regular incremental does this unconditionally.
             if self.meta and self.options.fine_grained_incremental:
                 self.verify_dependencies(suppressed_only=True)
-            self.manager.errors.generate_unused_ignore_errors(self.xpath)
+            is_typeshed = self.tree is not None and self.tree.is_typeshed_file(self.options)
+            self.manager.errors.generate_unused_ignore_errors(self.xpath, is_typeshed)
 
     def generate_ignore_without_code_notes(self) -> None:
         if self.manager.errors.is_error_code_enabled(codes.IGNORE_WITHOUT_CODE):
+            is_typeshed = self.tree is not None and self.tree.is_typeshed_file(self.options)
             self.manager.errors.generate_ignore_without_code_errors(
-                self.xpath, self.options.warn_unused_ignores
+                self.xpath, self.options.warn_unused_ignores, is_typeshed
             )
 
 
@@ -3809,7 +3833,7 @@ def load_graph(
                         st.suppress_dependency(dep)
                 else:
                     if newst.path:
-                        newst_path = os.path.abspath(newst.path)
+                        newst_path = newst.abspath
 
                         if newst_path in seen_files:
                             manager.errors.report(
@@ -4303,7 +4327,7 @@ def sorted_components(graph: Graph) -> list[SCC]:
     scc_dep_map = prepare_sccs_full(strongly_connected_components(vertices, edges), edges)
     # Topsort.
     res = []
-    for ready in topsort2(scc_dep_map):
+    for ready in topsort(scc_dep_map):
         # Sort the sets in ready by reversed smallest State.order.  Examples:
         #
         # - If ready is [{x}, {y}], x.order == 1, y.order == 2, we get
@@ -4338,7 +4362,7 @@ def sorted_components_inner(
     edges = {id: deps_filtered(graph, vertices, id, pri_max) for id in vertices}
     sccs = list(strongly_connected_components(vertices, edges))
     res = []
-    for ready in topsort2(prepare_sccs(sccs, edges)):
+    for ready in topsort(prepare_sccs(sccs, edges)):
         res.extend(sorted(ready, key=lambda scc: -min(graph[id].order for id in scc)))
     return res
 
@@ -4357,17 +4381,20 @@ def deps_filtered(graph: Graph, vertices: AbstractSet[str], id: str, pri_max: in
 
 def transitive_dep_hash(scc: SCC, graph: Graph) -> bytes:
     """Compute stable snapshot of transitive import structure for given SCC."""
-    all_direct_deps = {
-        dep
-        for id in scc.mod_ids
-        for dep in graph[id].dependencies
-        if graph[id].priorities.get(dep) != PRI_INDIRECT
-    }
-    trans_dep_hash_map = {
-        dep_id: "" if dep_id in scc.mod_ids else graph[dep_id].trans_dep_hash.hex()
-        for dep_id in all_direct_deps
-    }
-    return hash_digest_bytes(json_dumps(trans_dep_hash_map))
+    all_direct_deps = sorted(
+        {
+            dep
+            for id in scc.mod_ids
+            for dep in graph[id].dependencies
+            if graph[id].priorities.get(dep) != PRI_INDIRECT
+        }
+    )
+    buf = WriteBuffer()
+    for dep_id in all_direct_deps:
+        write_str_bare(buf, dep_id)
+        if dep_id not in scc.mod_ids:
+            write_bytes_bare(buf, graph[dep_id].trans_dep_hash)
+    return hash_digest_bytes(buf.getvalue())
 
 
 def missing_stubs_file(cache_dir: str) -> str:
