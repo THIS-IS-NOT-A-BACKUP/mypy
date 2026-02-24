@@ -312,20 +312,20 @@ class ConditionalTypeBinder:
             keys = list(set(keys))
         for key in keys:
             current_value = self._get(key)
-            all_resulting_values = [f.types.get(key, current_value) for f in frames]
+            resulting_values = [f.types.get(key, current_value) for f in frames]
             # Keys can be narrowed using two different semantics. The new semantics
             # is enabled for plain variables when bind_all is true, and it allows
             # variable types to be widened using subsequent assignments. This is
             # tricky to support for instance attributes (primarily due to deferrals),
             # so we don't use it for them.
             old_semantics = not self.bind_all or extract_var_from_literal_hash(key) is None
-            if old_semantics and any(x is None for x in all_resulting_values):
+            if old_semantics and any(x is None for x in resulting_values):
                 # We didn't know anything about key before
                 # (current_value must be None), and we still don't
                 # know anything about key in at least one possible frame.
                 continue
 
-            resulting_values = [x for x in all_resulting_values if x is not None]
+            resulting_values = [x for x in resulting_values if x is not None]
 
             if all_reachable and all(not x.from_assignment for x in resulting_values):
                 # Do not synthesize a new type if we encountered a conditional block
@@ -395,7 +395,7 @@ class ConditionalTypeBinder:
                 if current_value is not None or extract_var_from_literal_hash(key) is None:
                     # We definitely learned something new
                     changed = True
-                else:
+                elif not changed:
                     # If there is no current value compare with the declaration. This prevents
                     # reporting false changes in cases like this:
                     #     x: int
