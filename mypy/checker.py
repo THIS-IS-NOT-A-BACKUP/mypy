@@ -3283,7 +3283,7 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi, SplittingVisitor):
         # as X | Y.
         if not (s.is_alias_def and self.is_stub):
             with self.enter_final_context(s.is_final_def):
-                self.check_assignment(s.lvalues[-1], s.rvalue, s.type is None, s.new_syntax)
+                self.check_assignment(s.lvalues[-1], s.rvalue, s.type is None)
 
         if s.is_alias_def:
             self.check_type_alias_rvalue(s)
@@ -3331,11 +3331,7 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi, SplittingVisitor):
         self.store_type(s.lvalues[-1], alias_type)
 
     def check_assignment(
-        self,
-        lvalue: Lvalue,
-        rvalue: Expression,
-        infer_lvalue_type: bool = True,
-        new_syntax: bool = False,
+        self, lvalue: Lvalue, rvalue: Expression, infer_lvalue_type: bool = True
     ) -> None:
         """Type check a single assignment: lvalue = rvalue."""
         if isinstance(lvalue, (TupleExpr, ListExpr)):
@@ -3413,15 +3409,6 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi, SplittingVisitor):
                             # We are replacing partial<None> now, so the variable type
                             # should remain optional.
                             self.set_inferred_type(var, lvalue, make_optional_type(fallback))
-                elif (
-                    is_literal_none(rvalue)
-                    and isinstance(lvalue, NameExpr)
-                    and isinstance(lvalue.node, Var)
-                    and lvalue.node.is_initialized_in_class
-                    and not new_syntax
-                ):
-                    # Allow None's to be assigned to class variables with non-Optional types.
-                    rvalue_type = lvalue_type
                 elif (
                     isinstance(lvalue, MemberExpr) and lvalue.kind is None
                 ):  # Ignore member access to modules
@@ -5303,9 +5290,7 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi, SplittingVisitor):
             # There is no __ifoo__, treat as x = x <foo> y
             expr = OpExpr(s.op, s.lvalue, s.rvalue)
             expr.set_line(s)
-            self.check_assignment(
-                lvalue=s.lvalue, rvalue=expr, infer_lvalue_type=True, new_syntax=False
-            )
+            self.check_assignment(lvalue=s.lvalue, rvalue=expr, infer_lvalue_type=True)
         self.check_final(s)
 
     def visit_assert_stmt(self, s: AssertStmt) -> None:
@@ -8518,12 +8503,12 @@ def conditional_types(
     proposed_type: Type
     remaining_type: Type
 
-    proper_type = get_proper_type(current_type)
+    p_current_type = get_proper_type(current_type)
     # factorize over union types: isinstance(A|B, C) -> yes = A_yes | B_yes
-    if isinstance(proper_type, UnionType):
+    if isinstance(p_current_type, UnionType):
         yes_items: list[Type] = []
         no_items: list[Type] = []
-        for union_item in proper_type.items:
+        for union_item in p_current_type.items:
             yes_type, no_type = conditional_types(
                 union_item,
                 proposed_type_ranges,
@@ -8549,7 +8534,7 @@ def conditional_types(
         items[i] = item
     proposed_type = get_proper_type(UnionType.make_union(items))
 
-    if isinstance(proper_type, AnyType):
+    if isinstance(p_current_type, AnyType):
         return proposed_type, current_type
     if isinstance(proposed_type, AnyType):
         # We don't really know much about the proposed type, so we shouldn't
@@ -8600,6 +8585,11 @@ def conditional_types(
         proposed_precise_type,
         consider_runtime_isinstance=consider_runtime_isinstance,
     )
+
+    # Avoid widening the type
+    if is_proper_subtype(p_current_type, proposed_type, ignore_promotions=True):
+        proposed_type = default if default is not None else current_type
+
     return proposed_type, remaining_type
 
 
