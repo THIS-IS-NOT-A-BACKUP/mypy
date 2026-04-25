@@ -48,6 +48,7 @@ from mypy.build import (
 )
 from mypy.cache import Tag, read_int_list, read_json
 from mypy.defaults import RECURSION_LIMIT, WORKER_CONNECTION_TIMEOUT, WORKER_IDLE_TIMEOUT
+from mypy.error_formatter import OUTPUT_CHOICES
 from mypy.errors import CompileError, ErrorInfo, Errors, report_internal_error
 from mypy.fscache import FileSystemCache
 from mypy.ipc import IPCException, IPCServer, ready_to_read, receive, send
@@ -102,6 +103,7 @@ def main(argv: list[str]) -> None:
         raise
 
     fscache = FileSystemCache()
+    fscache.set_package_root(options.package_root)
     cached_read = fscache.read
     errors = Errors(options, read_source=lambda path: read_py_file(path, cached_read))
 
@@ -319,24 +321,27 @@ def setup_worker_manager(sources: list[BuildSource], ctx: ServerContext) -> Buil
         # We never flush errors in the worker, we send them back to coordinator.
         pass
 
-    return BuildManager(
-        data_dir,
-        search_paths,
-        ignore_prefix=os.getcwd(),
-        source_set=source_set,
-        reports=None,
-        options=options,
-        version_id=__version__,
-        plugin=plugin,
-        plugins_snapshot=snapshot,
-        errors=ctx.errors,
-        error_formatter=None,
-        flush_errors=flush_errors,
-        fscache=ctx.fscache,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        parallel_worker=True,
-    )
+    try:
+        return BuildManager(
+            data_dir,
+            search_paths,
+            ignore_prefix=os.getcwd(),
+            source_set=source_set,
+            reports=None,
+            options=options,
+            version_id=__version__,
+            plugin=plugin,
+            plugins_snapshot=snapshot,
+            errors=ctx.errors,
+            error_formatter=None if options.output is None else OUTPUT_CHOICES.get(options.output),
+            flush_errors=flush_errors,
+            fscache=ctx.fscache,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            parallel_worker=True,
+        )
+    except CompileError:
+        return None
 
 
 def console_entry() -> None:
