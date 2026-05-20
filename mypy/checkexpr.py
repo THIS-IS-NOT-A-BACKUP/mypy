@@ -932,7 +932,8 @@ class ExpressionChecker(ExpressionVisitor[Type], ExpressionCheckerSharedApi):
         kwargs: list[tuple[Expression | None, Expression]],
         context: Context,
     ) -> bool:
-        result = self.validate_typeddict_kwargs(kwargs=kwargs, callee=callee)
+        with self.msg.filter_errors():
+            result = self.validate_typeddict_kwargs(kwargs=kwargs, callee=callee)
         if result is not None:
             validated_kwargs, _ = result
             return callee.required_keys <= set(validated_kwargs.keys()) <= set(callee.items.keys())
@@ -1746,6 +1747,28 @@ class ExpressionChecker(ExpressionVisitor[Type], ExpressionCheckerSharedApi):
             callee.arg_names,
             lambda i: self.accept(args[i]),
         )
+
+        if callee.special_sig == "tuple" and len(args) == 1:
+            with self.msg.filter_errors():
+                arg_type = get_proper_type(self.accept(args[0]))
+            # Give precise constructor signature for situations like this:
+            #     class Shape[*Ts](tuple[*Ts]): ...
+            #     Shape((1, 2))
+            # The argument type is the same as return type, but with builtins.tuple fallback.
+            if isinstance(arg_type, TupleType):
+                assert isinstance(callee.ret_type, ProperType)
+                if isinstance(callee.ret_type, TupleType):
+                    # Actual type argument is ignored by tuple_fallback() in this case.
+                    any_type = AnyType(TypeOfAny.special_form)
+                    new_arg_type = callee.ret_type.copy_modified(
+                        fallback=self.chk.named_generic_type("builtins.tuple", [any_type])
+                    )
+                    callee = callee.copy_modified(arg_types=[new_arg_type])
+                elif isinstance(callee.ret_type, Instance):
+                    new_arg_type = map_instance_to_supertype(
+                        callee.ret_type, self.chk.lookup_typeinfo("builtins.tuple")
+                    )
+                    callee = callee.copy_modified(arg_types=[new_arg_type])
 
         if callee.is_generic():
             need_refresh = any(
