@@ -180,7 +180,7 @@ async def sleep(delay: float) -> None: ...
 [typing fixtures/typing-full.pyi]
 
 [case testRunAsyncAwaitInVariousPositions]
-from typing import cast, Any
+from typing import Any, Generator, cast
 
 import asyncio
 
@@ -264,6 +264,33 @@ async def construct(s: str) -> str:
 async def test_construct() -> None:
     assert await construct("foo") == "foo!foo?"
 
+class Box:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+class Suspend:
+    def __await__(self) -> Generator[Any, Any, int]:
+        yield None
+        return 7
+
+def combine(value: Box, number: int) -> str:
+    return value.value + str(number)
+
+async def frame_arg_across_await(value: Box) -> str:
+    # Evaluation reads value before suspending, but combine() uses it after resume.
+    return combine(value, await Suspend())
+
+def drive(coro: Any) -> Any:
+    assert coro.send(None) is None
+    try:
+        coro.send(None)
+    except StopIteration as exc:
+        return exc.value
+    assert False
+
+def test_generator_attribute_borrow_does_not_cross_await() -> None:
+    assert drive(frame_arg_across_await(Box("value"))) == "value7"
+
 [file asyncio/__init__.pyi]
 async def sleep(t: float) -> None: ...
 
@@ -292,8 +319,12 @@ async def async_with_vectorcall() -> str:
     async with ctx:
         return await async_val("vc")
 
+async def async_with_pass() -> None:
+    async with async_ctx():
+        pass
+
 [file driver.py]
-from native import async_with, async_with_vectorcall
+from native import async_with, async_with_pass, async_with_vectorcall
 from testutil import run_generator
 
 yields, val = run_generator(async_with(), [None, 'x', None])
@@ -303,6 +334,10 @@ assert val == 'x', val
 yields, val = run_generator(async_with_vectorcall(), [None, 'x', None])
 assert yields == ('enter', 'vc', 'exit'), yields
 assert val == 'x', val
+
+yields, val = run_generator(async_with_pass(), [None, None])
+assert yields == ('enter', 'exit'), yields
+assert val is None
 
 [case testAsyncReturn]
 from testutil import async_val

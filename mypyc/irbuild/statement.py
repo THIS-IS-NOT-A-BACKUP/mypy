@@ -49,7 +49,12 @@ from mypy.nodes import (
     YieldExpr,
     YieldFromExpr,
 )
-from mypyc.common import GENERATOR_HELPER_NAME, KEEP_ALIVE_SHORT_LIVED, KEEP_ALIVE_WHOLE_EXPRESSION
+from mypyc.common import (
+    GENERATOR_HELPER_NAME,
+    KEEP_ALIVE_SHORT_LIVED,
+    KEEP_ALIVE_WHOLE_EXPRESSION,
+    source_name_from_generator_attribute,
+)
 from mypyc.ir.ops import (
     ERR_NEVER,
     NAMESPACE_MODULE,
@@ -712,6 +717,9 @@ def transform_try_except(
     builder.builder.push_error_handler(double_except_block)
     builder.activate_block(except_entry)
     old_exc = builder.call_c(error_catch_op, [], line)
+    if builder.fn_info.is_generator:
+        # CFG cleanup may remove the CallC's block while resume cleanup paths remain.
+        old_exc = builder.ensure_register(old_exc)
     # Compile the except blocks with the nonlocal control flow overridden to clear exc_info
     builder.nonlocal_control.append(ExceptNonlocalControl(builder.nonlocal_control[-1], old_exc))
 
@@ -1266,7 +1274,9 @@ def transform_del_item(builder: IRBuilder, target: AssignmentTarget, line: int) 
         if isinstance(target.obj_type, RInstance):
             cl = target.obj_type.class_ir
             if not cl.is_deletable(target.attr):
-                builder.error(f'"{target.attr}" cannot be deleted', line)
+                _, decl_cl = cl.attr_details(target.attr)
+                name = source_name_from_generator_attribute(target.attr, decl_cl.fullname)
+                builder.error(f'"{name}" cannot be deleted', line)
                 builder.note(
                     'Using "__deletable__ = '
                     + '[\'<attr>\']" in the class body enables "del obj.<attr>"',
