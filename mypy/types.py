@@ -222,6 +222,12 @@ _dummy: Final[Any] = object()
 # A placeholder for int parameters
 _dummy_int: Final = -999999
 
+# Maximum protocol subtyping assumptions depth. We need this to avoid infinite
+# recursion for protocols that are genuinely undecidable, see testDivergingProtocol.
+# We set a conservative cut-off, since some numerical libraries currently
+# use ~10 assumptions, and we want to avoid false negatives with them.
+MAX_PROTOCOL_DEPTH: Final = 20
+
 
 class TypeOfAny:
     """

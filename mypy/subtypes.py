@@ -37,6 +37,7 @@ from mypy.nodes import (
 from mypy.options import Options
 from mypy.state import state
 from mypy.types import (
+    MAX_PROTOCOL_DEPTH,
     MYPYC_NATIVE_INT_NAMES,
     TUPLE_LIKE_INSTANCE_NAMES,
     TYPED_NAMEDTUPLE_NAMES,
@@ -740,17 +741,16 @@ class SubtypeVisitor(TypeVisitor[bool]):
                 # Similarly, if one function has `TypeIs` and the other does not,
                 # they are not compatible.
                 return False
+            strict_concatenate = False
+            if options := self.options:
+                strict_concatenate = options.extra_checks or options.strict_concatenate
             return is_callable_compatible(
                 left,
                 right,
                 is_compat=self._is_subtype,
                 is_proper_subtype=self.proper_subtype,
                 ignore_pos_arg_names=self.subtype_context.ignore_pos_arg_names,
-                strict_concatenate=(
-                    (self.options.extra_checks or self.options.strict_concatenate)
-                    if self.options
-                    else False
-                ),
+                strict_concatenate=strict_concatenate,
             )
         elif isinstance(right, Overloaded):
             return all(self._is_subtype(left, item) for item in right.items)
@@ -1309,6 +1309,8 @@ def is_protocol_implementation(
         if not members_right.issubset(members_left):
             return False
     assuming = right.type.assuming_proper if proper_subtype else right.type.assuming
+    if len(assuming) > MAX_PROTOCOL_DEPTH:
+        return True
     for l, r in reversed(assuming):
         if l == left and r == right:
             return True
@@ -2162,21 +2164,26 @@ def unify_generic_callable(
     if return_constraint_direction is None:
         return_constraint_direction = mypy.constraints.SUBTYPE_OF
 
-    constraints: list[mypy.constraints.Constraint] = []
-    # There is some special logic for inference in callables, so better use them
-    # as wholes instead of picking separate arguments.
-    cs = mypy.constraints.infer_constraints(
-        type.copy_modified(ret_type=UninhabitedType()),
-        target.copy_modified(ret_type=UninhabitedType()),
-        mypy.constraints.SUBTYPE_OF,
-        skip_neg_op=True,
-    )
-    constraints.extend(cs)
-    if not ignore_return:
-        c = mypy.constraints.infer_constraints(
-            type.ret_type, target.ret_type, return_constraint_direction
+    # This code is hot in numerical libraries, so we use a faster inference
+    #  algorithm (that may give slightly worse results in rare cases).
+    keep_unions_old = type_state.keep_unions
+    type_state.keep_unions = True
+    try:
+        # There is some special logic for inference in callables, so better use
+        # them as wholes instead of picking separate arguments.
+        constraints = mypy.constraints.infer_constraints(
+            type.copy_modified(ret_type=UninhabitedType()),
+            target.copy_modified(ret_type=UninhabitedType()),
+            mypy.constraints.SUBTYPE_OF,
+            skip_neg_op=True,
         )
-        constraints.extend(c)
+        if not ignore_return:
+            c = mypy.constraints.infer_constraints(
+                type.ret_type, target.ret_type, return_constraint_direction
+            )
+            constraints.extend(c)
+    finally:
+        type_state.keep_unions = keep_unions_old
     inferred_vars, _ = mypy.solve.solve_constraints(
         type.variables, constraints, allow_polymorphic=True
     )
@@ -2201,7 +2208,9 @@ def unify_generic_callable(
     return cast(NormalizedCallableType, applied)
 
 
-def union_function_signatures(callables: list[CallableType]) -> CallableType | None:
+def union_function_signatures(
+    callables: list[CallableType], *, simplify_unions: bool = False
+) -> CallableType | None:
     """Combine a list of functions by taking the union of all the arguments and return types."""
     if len(callables) == 1:
         return callables[0]
@@ -2219,15 +2228,27 @@ def union_function_signatures(callables: list[CallableType]) -> CallableType | N
     # confusing and ought to be re-written anyway.)
     callables, variables = merge_typevars_in_callables_by_name(callables)
 
-    new_args: list[list[Type]] = [[] for _ in callables[0].arg_types]
-    new_kinds = list(callables[0].arg_kinds)
+    new_callable = callables[0].with_unpacked_kwargs().with_normalized_var_args()
+    new_args: list[list[Type]] = [[] for _ in new_callable.arg_types]
+    new_kinds = list(new_callable.arg_kinds)
+    new_names = list(new_callable.arg_names)
     new_returns: list[Type] = []
 
     for target in callables:
+        target = target.with_unpacked_kwargs().with_normalized_var_args()
         # TODO: Enhance the merging logic to handle a wider variety of signatures.
+        # In particular, allow name-only arguments that appear in different order.
         if len(new_kinds) != len(target.arg_kinds):
             return None
         for i, (new_kind, target_kind) in enumerate(zip(new_kinds, target.arg_kinds)):
+            if target.arg_names[i] != new_callable.arg_names[i]:
+                if target_kind.is_named():
+                    return None
+                if target_kind.is_positional():
+                    new_names[i] = None
+            if isinstance(target.arg_types[i], (ParamSpecType, UnpackType)):
+                # It is risky to put these inside a union.
+                return None
             if new_kind == target_kind:
                 continue
             if new_kind.is_positional() and target_kind.is_positional():
@@ -2239,12 +2260,19 @@ def union_function_signatures(callables: list[CallableType]) -> CallableType | N
             new_args[i].append(arg)
         new_returns.append(target.ret_type)
 
-    return callables[0].copy_modified(
-        arg_types=[mypy.typeops.make_simplified_union(args) for args in new_args],
+    if simplify_unions:
+        arg_types = [mypy.typeops.make_simplified_union(args) for args in new_args]
+        ret_type = mypy.typeops.make_simplified_union(new_returns)
+    else:
+        arg_types = [UnionType.make_union(args) for args in new_args]
+        ret_type = UnionType.make_union(new_returns)
+
+    return new_callable.copy_modified(
+        arg_types=arg_types,
         arg_kinds=new_kinds,
-        ret_type=mypy.typeops.make_simplified_union(new_returns),
+        arg_names=new_names,
+        ret_type=ret_type,
         variables=variables,
-        implicit=True,
     )
 
 
