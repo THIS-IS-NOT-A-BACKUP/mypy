@@ -491,6 +491,10 @@ def handle_ext_method(builder: IRBuilder, cdef: ClassDef, fdef: FuncDef) -> None
     builder.functions.append(func_ir)
 
     if is_decorated(builder, fdef):
+        if name == "__new__" and class_ir.is_trait:
+            # A decorated __new__ is called by an inherited tp_new, and a class only
+            # inherits tp_new from its first base class.
+            builder.error('Decorated "__new__" not supported in traits', fdef.line)
         # Obtain the function name in order to construct the name of the helper function.
         _, _, name = fdef.fullname.rpartition(".")
         # Get the callable representing the non-decorated method directly from the type
@@ -516,6 +520,12 @@ def handle_ext_method(builder: IRBuilder, cdef: ClassDef, fdef: FuncDef) -> None
         elif func_ir.decl.kind == FUNC_STATICMETHOD:
             stat_meth = builder.load_module_attr_by_fullname("builtins.staticmethod", fdef.line)
             decorated_func = builder.py_call(stat_meth, [decorated_func], fdef.line)
+        elif fdef.is_property:
+            # Mypy also removes @property, and only accepts other decorators below it.
+            # The decorated getter can't be called natively, so this becomes a regular
+            # Python property instead of a native one.
+            prop = builder.load_module_attr_by_fullname("builtins.property", fdef.line)
+            decorated_func = builder.py_call(prop, [decorated_func], fdef.line)
 
         # Set the callable object representing the decorated method as an attribute of the
         # extension class.
@@ -523,7 +533,7 @@ def handle_ext_method(builder: IRBuilder, cdef: ClassDef, fdef: FuncDef) -> None
             py_setattr_op, [typ, builder.load_str(name), decorated_func], fdef.line
         )
 
-    if fdef.is_property:
+    elif fdef.is_property:
         # If there is a property setter, it will be processed after the getter,
         # We populate the optional setter field with none for now.
         assert name not in class_ir.properties
@@ -531,9 +541,14 @@ def handle_ext_method(builder: IRBuilder, cdef: ClassDef, fdef: FuncDef) -> None
 
     elif fdef in builder.prop_setters:
         # The respective property getter must have been processed already
-        assert name in class_ir.properties
-        getter_ir, _ = class_ir.properties[name]
-        class_ir.properties[name] = (getter_ir, func_ir)
+        if name in class_ir.properties:
+            getter_ir, _ = class_ir.properties[name]
+            class_ir.properties[name] = (getter_ir, func_ir)
+        else:
+            # A getter with other decorators isn't a native property (see above).
+            builder.error(
+                "Property setter not supported when the getter has other decorators", fdef.line
+            )
 
     class_ir.methods[func_ir.decl.name] = func_ir
 
