@@ -4045,6 +4045,309 @@ class Derived(Base):
 def test_inherited() -> None:
     assert Derived()() == 1
 
+[case testCallTypeObjectOfNativeClass]
+from abc import ABC, abstractmethod
+from typing import Any, overload
+
+from mypy_extensions import i64, mypyc_attr
+
+class Point:
+    def __init__(self, x: int, y: int, name: str = "p") -> None:
+        self.x = x
+        self.y = y
+        self.name = name
+
+    @classmethod
+    def make(cls, x: int) -> "Point":
+        return cls(x, y=x + 1)
+
+    def copy(self) -> "Point":
+        return type(self)(self.x, self.y, self.name)
+
+class Point3(Point):
+    pass
+
+class Origin(Point):
+    def __init__(self, name: str) -> None:
+        super().__init__(0, 0, name)
+
+class KwOnly:
+    def __init__(self, a: int, *, s: str = "x", req: float) -> None:
+        self.a = a
+        self.s = s
+        self.req = req
+
+class Fixed:
+    def __init__(self, x: i64 = 5, y: i64 = -1) -> None:
+        self.x = x
+        self.y = y
+
+class NoArgs:
+    def __init__(self) -> None:
+        self.x = 1
+
+class Fails:
+    def __init__(self, x: int) -> None:
+        raise ValueError(str(x))
+
+@mypyc_attr(allow_interpreted_subclasses=True)
+class Open:
+    def __init__(self, a: int) -> None:
+        self.a = a
+
+class Adder:
+    def __call__(self, x: int) -> int:
+        return x + 1
+
+class AdderN(Adder):
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+# A call to the type object of one of the classes below doesn't go straight to the
+# native constructor.
+
+class NoInit:
+    x = 3
+
+calls: list[str] = []
+
+def logged(f: Any) -> Any:
+    def wrapper(self: Any) -> None:
+        calls.append("logged")
+        f(self)
+    return wrapper
+
+class Decorated:
+    @logged
+    def __init__(self) -> None:
+        self.x = 1
+
+class WithNew:
+    def __new__(cls, x: int) -> Any:
+        if cls is WithNew and x < 0:
+            # type.__call__ calls __init__ on an instance of a subclass.
+            return WithNewSub.__new__(WithNewSub, x)
+        return super().__new__(cls)
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+class WithNewSub(WithNew):
+    def __init__(self, x: int) -> None:
+        self.x = x * 10
+
+def logged_new(f: Any) -> Any:
+    def wrapper(cls: Any, *args: Any) -> Any:
+        calls.append("logged_new")
+        return f(cls, *args)
+    return wrapper
+
+class DecoratedNew:
+    @logged_new
+    def __new__(cls, x: Any = None) -> Any:
+        return super().__new__(cls)
+
+    # With an overloaded __init__ the native constructor takes no arguments
+    # (mypyc/mypyc#961) instead of *args and **kwargs. It calls the type object.
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(self, x: int) -> None: ...
+    def __init__(self, x: Any = None) -> None:
+        self.x = x
+
+class VarArgs:
+    def __init__(self, *args: int, **kwargs: str) -> None:
+        self.args = args
+        self.kwargs = kwargs
+
+class Shape(ABC):
+    def __init__(self, sides: int) -> None:
+        self.sides = sides
+
+    @abstractmethod
+    def area(self) -> float: ...
+
+class Square(Shape):
+    def area(self) -> float:
+        return 1.0
+
+[file other.py]
+# Run in both interpreted and compiled mode
+from typing import Any
+
+import native
+from testutil import assertRaises
+
+# In compiled code a call to one of these is a call to the type object. A call to the
+# class itself would be a direct call to the native constructor.
+Point: Any = native.Point
+Point3: Any = native.Point3
+Origin: Any = native.Origin
+KwOnly: Any = native.KwOnly
+Fixed: Any = native.Fixed
+NoArgs: Any = native.NoArgs
+Fails: Any = native.Fails
+Open: Any = native.Open
+AdderN: Any = native.AdderN
+NoInit: Any = native.NoInit
+Decorated: Any = native.Decorated
+WithNew: Any = native.WithNew
+DecoratedNew: Any = native.DecoratedNew
+VarArgs: Any = native.VarArgs
+Shape: Any = native.Shape
+Square: Any = native.Square
+
+def test_arguments() -> None:
+    p = Point(1, 2)
+    assert (p.x, p.y, p.name) == (1, 2, "p")
+    p = Point(1, 2, "q")
+    assert (p.x, p.y, p.name) == (1, 2, "q")
+    p = Point(1, y=2, name="q")
+    assert (p.x, p.y, p.name) == (1, 2, "q")
+    p = Point(name="q", y=2, x=1)
+    assert (p.x, p.y, p.name) == (1, 2, "q")
+    args = (1, 2)
+    kwargs = {"name": "q"}
+    p = Point(*args, **kwargs)
+    assert (p.x, p.y, p.name) == (1, 2, "q")
+    p = Point(10**30, -(10**30))
+    assert (p.x, p.y) == (10**30, -(10**30))
+
+    k = KwOnly(1, req=2.5)
+    assert (k.a, k.s, k.req) == (1, "x", 2.5)
+    k = KwOnly(req=2, s="q", a=1)
+    assert (k.a, k.s, k.req) == (1, "q", 2.0)
+
+    f = Fixed()
+    assert (f.x, f.y) == (5, -1)
+    f = Fixed(7)
+    assert (f.x, f.y) == (7, -1)
+    f = Fixed(y=-(2**63))
+    assert (f.x, f.y) == (5, -(2**63))
+
+    assert NoArgs().x == 1
+    assert Open(7).a == 7
+    assert Open(a=7).a == 7
+
+def test_errors() -> None:
+    with assertRaises(TypeError, "__init__() missing required argument 'y' (pos 2)"):
+        Point(1)
+    with assertRaises(TypeError, "__init__() takes at most 3 arguments (4 given)"):
+        Point(1, 2, "q", 4)
+    with assertRaises(TypeError, "'z' is an invalid keyword argument for __init__()"):
+        Point(1, 2, z=3)
+    with assertRaises(TypeError, "argument for __init__() given by name ('x') and position (1)"):
+        Point(1, 2, x=3)
+    with assertRaises(TypeError, "int object expected; got str"):
+        Point("1", 2)
+    with assertRaises(TypeError, "str object expected; got int"):
+        Point(1, 2, name=3)
+    with assertRaises(TypeError, "__init__() missing required keyword-only argument 'req'"):
+        KwOnly(1)
+    with assertRaises(TypeError, "__init__() takes exactly 1 positional argument (2 given)"):
+        KwOnly(1, "q")
+    with assertRaises(TypeError, "i64 object expected; got int"):
+        Fixed(2**63)
+    with assertRaises(TypeError, "__init__() takes at most 0 arguments (1 given)"):
+        NoArgs(1)
+    with assertRaises(TypeError, "__init__() missing required argument 'a' (pos 1)"):
+        Open()
+    with assertRaises(ValueError, "5"):
+        Fails(5)
+
+def test_subclasses() -> None:
+    p = Point3(1, 2)
+    assert type(p) is native.Point3
+    assert (p.x, p.y, p.name) == (1, 2, "p")
+    with assertRaises(TypeError, "__init__() missing required argument 'y' (pos 2)"):
+        Point3(1)
+
+    o = Origin("o")
+    assert type(o) is native.Origin
+    assert (o.x, o.y, o.name) == (0, 0, "o")
+    with assertRaises(TypeError, "__init__() takes at most 1 argument (2 given)"):
+        Origin(1, 2)
+
+def test_calls_in_compiled_methods() -> None:
+    p = Point.make(4)
+    assert type(p) is native.Point
+    assert (p.x, p.y, p.name) == (4, 5, "p")
+    p = Point3.make(4)
+    assert type(p) is native.Point3
+    assert (p.x, p.y, p.name) == (4, 5, "p")
+
+    p = Point3(1, 2, "q").copy()
+    assert type(p) is native.Point3
+    assert (p.x, p.y, p.name) == (1, 2, "q")
+
+def test_callable_instance() -> None:
+    a = AdderN(5)
+    assert a.n == 5
+    assert a(1) == 2
+
+def test_classes_without_native_constructor_call() -> None:
+    assert NoInit().x == 3
+
+    native.calls.clear()
+    assert Decorated().x == 1
+    assert "logged" in native.calls
+
+    assert WithNew(5).x == 5
+    w = WithNew(-5)
+    assert type(w) is native.WithNewSub
+    assert w.x == -50
+
+    native.calls.clear()
+    assert DecoratedNew(5).x == 5
+    assert DecoratedNew().x is None
+    assert native.calls == ["logged_new", "logged_new"]
+
+    v = VarArgs(1, 2, a="b")
+    assert v.args == (1, 2)
+    assert v.kwargs == {"a": "b"}
+
+    s = Square(4)
+    assert s.sides == 4
+    with assertRaises(TypeError):
+        Shape(4)
+
+test_arguments()
+test_errors()
+test_subclasses()
+test_calls_in_compiled_methods()
+test_callable_instance()
+test_classes_without_native_constructor_call()
+
+[file driver.py]
+# Run the tests in both interpreted and compiled mode
+import other
+import other_interpreted
+
+from native import Open, Point
+
+# The slots that the type object used to be called through still work.
+p = type.__call__(Point, 1, y=2)
+assert (p.x, p.y, p.name) == (1, 2, "p")
+p = Point.__new__(Point, 1, 2, "q")
+assert (p.x, p.y, p.name) == (1, 2, "q")
+
+# An interpreted subclass doesn't use the native constructor of its base class.
+class Sub(Open):
+    def __init__(self, a, b):
+        super().__init__(a)
+        self.b = b
+
+class SubNoInit(Open):
+    pass
+
+s = Sub(1, b=2)
+assert type(s) is Sub
+assert (s.a, s.b) == (1, 2)
+s2 = SubNoInit(3)
+assert type(s2) is SubNoInit
+assert s2.a == 3
+
 [case testClassWithFinalAttribute]
 from typing import Final
 
@@ -7605,6 +7908,103 @@ def test_deletable_attr() -> None:
 
 test_deletable_attr()
 
+[case testDunderDelAttrWithInheritedSetAttr]
+from mypy_extensions import mypyc_attr
+from testutil import assertRaises
+from typing import Any
+
+log: list[str] = []
+
+class SetAttr:
+    _attributes: dict[str, object]
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_attributes", {})
+
+    def __setattr__(self, key: str, val: object) -> None:
+        self._attributes[key] = val
+
+class SetAttrInherited(SetAttr):
+    pass
+
+class DelAttr(SetAttr):
+    def __delattr__(self, key: str) -> None:
+        log.append("DelAttr")
+        del self._attributes[key]
+
+class DelAttrInherited(DelAttr):
+    pass
+
+class DelAttrOverridden(DelAttr):
+    def __delattr__(self, key: str) -> None:
+        log.append("DelAttrOverridden")
+        super().__delattr__(key)
+
+class DelAttrInSubSubclass(SetAttrInherited):
+    def __delattr__(self, key: str) -> None:
+        log.append("DelAttrInSubSubclass")
+        del self._attributes[key]
+
+class SetAttrOverridden(DelAttr):
+    def __setattr__(self, key: str, val: object) -> None:
+        super().__setattr__(key, val)
+
+@mypyc_attr(native_class=False)
+class NonNative:
+    _attributes: dict[str, object]
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_attributes", {})
+
+    def __setattr__(self, key: str, val: object) -> None:
+        self._attributes[key] = val
+
+class DelAttrNonNativeBase(NonNative):
+    def __delattr__(self, key: str) -> None:
+        log.append("DelAttrNonNativeBase")
+        del self._attributes[key]
+
+def check_delattr(i: Any, calls: list[str]) -> None:
+    i.one = 1
+    i.two = 2
+    i.three = 3
+    assert i._attributes == {"one": 1, "two": 2, "three": 3}
+
+    log.clear()
+    del i.one
+    assert log == calls
+    assert i._attributes == {"two": 2, "three": 3}
+
+    delattr(i, "two")
+    assert log == calls * 2
+    assert i._attributes == {"three": 3}
+
+    i.__delattr__("three")
+    assert log == calls * 3
+    assert i._attributes == {}
+
+    with assertRaises(KeyError):
+        del i.one
+
+def test_delattr_with_inherited_setattr() -> None:
+    check_delattr(DelAttr(), ["DelAttr"])
+    check_delattr(DelAttrInherited(), ["DelAttr"])
+    check_delattr(DelAttrOverridden(), ["DelAttrOverridden", "DelAttr"])
+    check_delattr(DelAttrInSubSubclass(), ["DelAttrInSubSubclass"])
+    check_delattr(SetAttrOverridden(), ["DelAttr"])
+    check_delattr(DelAttrNonNativeBase(), ["DelAttrNonNativeBase"])
+
+def test_inherited_setattr_without_delattr() -> None:
+    i: Any = SetAttr()
+    i.one = 1
+    with assertRaises(AttributeError):
+        del i.one
+
+    i = SetAttrInherited()
+    i.one = 1
+    with assertRaises(AttributeError):
+        del i.one
+
 [case testBufferCorruptedData_librt_internal]
 from librt.internal import (
     ReadBuffer, read_bool, read_str, read_float, read_int, read_tag, read_bytes
@@ -7834,6 +8234,329 @@ from native import Base
 Sub = type("Sub", (Base,), {})
 s = Sub()
 assert s.method() == "a1"
+
+[case testNativeMethodOverridesDecoratedMethod]
+from typing import Any, Callable, Iterator, TypeVar
+from mypy_extensions import mypyc_attr, trait
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+def same(f: F) -> F:
+    return f
+
+def to_str(f: Callable[..., int]) -> Callable[..., str]:
+    def wrapper(*args: Any) -> str:
+        return "s" + str(f(*args))
+    return wrapper
+
+def drop_arg(f: Callable[[Any, int], int]) -> Callable[[Any], int]:
+    def wrapper(self: Any) -> int:
+        return f(self, 10)
+    return wrapper
+
+events: list[str] = []
+
+def logged(f: F) -> F:
+    def wrapper(self: Any) -> None:
+        events.append("decorated")
+        f(self)
+    return wrapper  # type: ignore[return-value]
+
+class Base:
+    @same
+    def o(self) -> object:
+        return "base"
+
+    @to_str
+    def s(self) -> int:
+        return 5
+
+    @drop_arg
+    def n(self, x: int) -> int:
+        return x + 1
+
+    @same
+    def gen(self) -> Iterator[int]:
+        yield 1
+
+    @same
+    async def co(self) -> int:
+        return 1
+
+    @classmethod
+    @to_str
+    def c(cls) -> int:
+        return 6
+
+    @staticmethod
+    @to_str
+    def st() -> int:
+        return 7
+
+class Native(Base):
+    def o(self) -> int:
+        return 3
+
+    def s(self) -> str:
+        return "native"
+
+    def n(self) -> int:
+        return 2
+
+    def gen(self) -> Iterator[int]:
+        yield 2
+
+    async def co(self) -> int:
+        return 2
+
+    @classmethod
+    def c(cls) -> str:
+        return "c"
+
+    @staticmethod
+    def st() -> str:
+        return "st"
+
+class Leaf(Native):
+    def s(self) -> str:
+        return "leaf"
+
+class Inherits(Native):
+    pass
+
+class Decorated(Base):
+    @same
+    def s(self) -> str:
+        return "decorated"
+
+@trait
+class Trait:
+    @to_str
+    def s(self) -> int:
+        return 8
+
+class Impl(Trait):
+    def s(self) -> str:
+        return "impl"
+
+class Uses(Trait):
+    pass
+
+class Del:
+    @logged
+    def __del__(self) -> None:
+        events.append("Del")
+
+class NativeDel(Del):
+    def __del__(self) -> None:
+        events.append("NativeDel")
+
+@mypyc_attr(allow_interpreted_subclasses=True)
+class Open:
+    @to_str
+    def s(self) -> int:
+        return 9
+
+@mypyc_attr(allow_interpreted_subclasses=True)
+class OpenNative(Open):
+    def s(self) -> str:
+        return "open"
+
+def o_base(b: Base) -> object:
+    return b.o()
+
+def o_native(b: Native) -> int:
+    return b.o()
+
+def s_base(b: Base) -> str:
+    return b.s()
+
+def s_native(b: Native) -> str:
+    return b.s()
+
+def n_base(b: Base) -> int:
+    return b.n()
+
+def n_native(b: Native) -> int:
+    return b.n()
+
+def gen_base(b: Base) -> list[int]:
+    return list(b.gen())
+
+def gen_native(b: Native) -> list[int]:
+    return list(b.gen())
+
+async def co_base(b: Base) -> int:
+    return await b.co()
+
+async def co_native(b: Native) -> int:
+    return await b.co()
+
+def s_trait(t: Trait) -> str:
+    return t.s()
+
+def s_impl(i: Impl) -> str:
+    return i.s()
+
+def s_open(o: Open) -> str:
+    return o.s()
+
+def s_open_native(o: OpenNative) -> str:
+    return o.s()
+
+def test_native_method_overrides_decorated_method() -> None:
+    assert o_base(Base()) == "base"
+    assert o_base(Native()) == 3
+    assert o_native(Native()) == 3
+    assert o_native(Leaf()) == 3
+
+    assert s_base(Base()) == "s5"
+    assert s_base(Native()) == "native"
+    assert s_base(Leaf()) == "leaf"
+    assert s_base(Inherits()) == "native"
+    assert s_base(Decorated()) == "decorated"
+    assert s_native(Native()) == "native"
+    assert s_native(Leaf()) == "leaf"
+    assert s_native(Inherits()) == "native"
+
+    assert n_base(Base()) == 11
+    assert n_base(Native()) == 2
+    assert n_native(Native()) == 2
+
+    assert gen_base(Base()) == [1]
+    assert gen_base(Native()) == [2]
+    assert gen_native(Native()) == [2]
+
+    b: Base = Native()
+    assert Base.c() == "s6"
+    assert Native.c() == "c"
+    assert b.c() == "c"
+    assert Base.st() == "s7"
+    assert Native.st() == "st"
+    assert b.st() == "st"
+
+    assert s_trait(Impl()) == "impl"
+    assert s_trait(Uses()) == "s8"
+    assert s_impl(Impl()) == "impl"
+
+    assert s_open(Open()) == "s9"
+    assert s_open(OpenNative()) == "open"
+    assert s_open_native(OpenNative()) == "open"
+
+[typing fixtures/typing-full.pyi]
+[file driver.py]
+import asyncio
+from native import (
+    Base, Native, Leaf, Del, NativeDel, Open, OpenNative, co_base, co_native, events, s_open,
+    s_open_native, test_native_method_overrides_decorated_method,
+)
+
+test_native_method_overrides_decorated_method()
+
+assert Base().o() == "base"
+assert Native().o() == 3
+assert Base().s() == "s5"
+assert Native().s() == "native"
+assert Leaf().s() == "leaf"
+assert Base().n() == 11
+assert Native().n() == 2
+
+assert asyncio.run(co_base(Base())) == 1
+assert asyncio.run(co_base(Native())) == 2
+assert asyncio.run(co_native(Native())) == 2
+
+Del()
+assert events == ["decorated", "Del"], events
+events.clear()
+NativeDel()
+assert events == ["NativeDel"], events
+
+class Interp(OpenNative):
+    def s(self) -> str:
+        return "interp"
+
+class InterpInherits(OpenNative):
+    pass
+
+class InterpOpen(Open):
+    def s(self) -> str:
+        return "interp open"
+
+assert s_open(Interp()) == "interp"
+assert s_open_native(Interp()) == "interp"
+assert s_open(InterpInherits()) == "open"
+assert s_open_native(InterpInherits()) == "open"
+assert s_open(InterpOpen()) == "interp open"
+
+[case testNativePropertyOverridesDecoratedProperty]
+from typing import Any, Callable
+from mypy_extensions import trait
+
+def to_str(f: Callable[[Any], int]) -> Callable[[Any], str]:
+    def wrapper(self: Any) -> str:
+        return "s" + str(f(self))
+    return wrapper
+
+class Base:
+    @property
+    @to_str
+    def p(self) -> int:
+        return 5
+
+class Native(Base):
+    @property
+    def p(self) -> str:
+        return "native"
+
+class Leaf(Native):
+    @property
+    def p(self) -> str:
+        return "leaf"
+
+@trait
+class Trait:
+    @property
+    @to_str
+    def p(self) -> int:
+        return 7
+
+class Impl(Trait):
+    @property
+    def p(self) -> str:
+        return "impl"
+
+class Uses(Trait):
+    pass
+
+def p_base(b: Base) -> str:
+    return b.p
+
+def p_native(b: Native) -> str:
+    return b.p
+
+def p_trait(t: Trait) -> str:
+    return t.p
+
+def p_impl(i: Impl) -> str:
+    return i.p
+
+def test_native_property_overrides_decorated_property() -> None:
+    assert p_base(Base()) == "s5"
+    assert p_base(Native()) == "native"
+    assert p_base(Leaf()) == "leaf"
+    assert p_native(Native()) == "native"
+    assert p_native(Leaf()) == "leaf"
+    assert p_trait(Impl()) == "impl"
+    assert p_trait(Uses()) == "s7"
+    assert p_impl(Impl()) == "impl"
+
+[file driver.py]
+from native import Base, Native, Leaf, test_native_property_overrides_decorated_property
+
+test_native_property_overrides_decorated_property()
+assert Base().p == "s5"
+assert Native().p == "native"
+assert Leaf().p == "leaf"
 
 [case testClassVarSelfReference]
 # ClassVar initializers that reference other ClassVars from the same class.

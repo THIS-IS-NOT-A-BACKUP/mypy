@@ -2566,6 +2566,38 @@ class CompiledBase:
     def value(self) -> int:
         raise NotImplementedError
 
+[case testMultiModuleCallTypeObjectWithInheritedInit]
+from other import Base
+
+class Child(Base):
+    pass
+
+[file other.py]
+class Base:
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+[file driver.py]
+import other
+from native import Child
+
+c = Child(7)
+assert type(c) is Child
+assert c.x == 7
+assert Child(x=8).x == 8
+
+# An argument with the wrong type is reported in __init__, which is in another module.
+try:
+    Child("7")
+except TypeError as e:
+    assert str(e) == "int object expected; got str"
+    tb = e.__traceback__.tb_next
+    assert tb.tb_frame.f_globals is other.__dict__
+    assert tb.tb_frame.f_code.co_name == "__init__"
+    assert tb.tb_lineno == 2
+else:
+    assert False
+
 [case testFinalMethodCallsWithinAndAcrossModules]
 from other import FinalMethods, NativeBaseWithFinals, FinalTrait, SubclassOfNativeBase, SubclassOfTrait
 
@@ -4198,3 +4230,23 @@ assert o.ITEMS == [1, 2]
 b: Any = Base()
 assert b.COMPUTED == 7
 assert b.ITEMS is Base.ITEMS
+
+[case testImportPackageWithModuleGetattr]
+[file other_pkg/__init__.py]
+def __getattr__(name: str) -> str:
+    if name.startswith("__"):
+        raise AttributeError(name)
+    return name
+[file other_pkg/other_sub.py]
+x = 1
+[file driver.py]
+import importlib.machinery
+import other_pkg.other_sub
+
+assert other_pkg.other_sub.x == 1
+ext_suffixes = importlib.machinery.EXTENSION_SUFFIXES
+assert any(other_pkg.__file__.endswith(s) for s in ext_suffixes), other_pkg.__file__
+assert other_pkg.__path__
+assert other_pkg.__spec__ is not None
+assert other_pkg.__package__ == "other_pkg"
+assert other_pkg.missing == "missing"
