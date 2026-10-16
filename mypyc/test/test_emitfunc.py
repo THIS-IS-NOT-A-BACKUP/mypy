@@ -154,6 +154,11 @@ class TestFunctionEmitterVisitor(unittest.TestCase):
             NameGenerator([["mod"]]), True, target_python=TargetPython((3, 14), True)
         )
 
+    def use_gil_target(self) -> None:
+        self.context = EmitterContext(
+            NameGenerator([["mod"]]), True, target_python=TargetPython((3, 14), False)
+        )
+
     def test_goto(self) -> None:
         self.assert_emit(Goto(BasicBlock(2)), "goto CPyL2;")
 
@@ -524,6 +529,7 @@ class TestFunctionEmitterVisitor(unittest.TestCase):
         )
 
     def test_get_attr(self) -> None:
+        self.use_gil_target()
         self.assert_emit(
             GetAttr(self.r, "y", 1),
             """cpy_r_r0 = ((mod___AObject *)cpy_r_r)->_y;
@@ -533,6 +539,37 @@ class TestFunctionEmitterVisitor(unittest.TestCase):
                    CPyTagged_INCREF(cpy_r_r0);
                }
             """,
+        )
+
+    def test_get_attr_int_free_threaded(self) -> None:
+        self.use_free_threaded_target()
+        self.assert_emit(
+            GetAttr(self.r, "y", 1),
+            """\
+            cpy_r_r0 = CPyTagged_GetAttr((PyObject *)cpy_r_r, &((mod___AObject *)cpy_r_r)->_y);
+            if (unlikely(cpy_r_r0 == CPY_INT_TAG)) {
+                PyErr_SetString(PyExc_AttributeError, "attribute 'y' of 'A' undefined");
+            }
+            """,
+        )
+
+    def test_get_attr_int_merged_free_threaded(self) -> None:
+        self.use_free_threaded_target()
+        op = GetAttr(self.r, "y", 1)
+        branch = Branch(op, BasicBlock(8), BasicBlock(9), Branch.IS_ERROR)
+        branch.traceback_entry = ("foobar", 123)
+        self.assert_emit(
+            op,
+            """\
+            cpy_r_r0 = CPyTagged_GetAttr((PyObject *)cpy_r_r, &((mod___AObject *)cpy_r_r)->_y);
+            if (unlikely(cpy_r_r0 == CPY_INT_TAG)) {
+                CPy_AttributeError("prog.py", "foobar", "A", "y", 123, CPyStatic_prog___globals);
+                goto CPyL8;
+            }
+            goto CPyL9;
+            """,
+            next_branch=branch,
+            skip_next=True,
         )
 
     def test_get_attr_non_refcounted(self) -> None:
@@ -558,6 +595,7 @@ class TestFunctionEmitterVisitor(unittest.TestCase):
         )
 
     def test_get_attr_merged(self) -> None:
+        self.use_gil_target()
         op = GetAttr(self.r, "y", 1)
         branch = Branch(op, BasicBlock(8), BasicBlock(9), Branch.IS_ERROR)
         branch.traceback_entry = ("foobar", 123)
@@ -598,6 +636,7 @@ class TestFunctionEmitterVisitor(unittest.TestCase):
         )
 
     def test_set_attr(self) -> None:
+        self.use_gil_target()
         self.assert_emit(
             SetAttr(self.r, "y", self.m, 1),
             """if (((mod___AObject *)cpy_r_r)->_y != CPY_INT_TAG) {
@@ -618,6 +657,22 @@ class TestFunctionEmitterVisitor(unittest.TestCase):
             """,
         )
 
+    def test_set_attr_int_free_threaded(self) -> None:
+        self.use_free_threaded_target()
+        self.assert_emit(
+            SetAttr(self.r, "y", self.m, 1),
+            """\
+            CPyTagged_SetAttr((PyObject *)cpy_r_r, &((mod___AObject *)cpy_r_r)->_y, cpy_r_m);
+            cpy_r_r0 = 1;
+            """,
+        )
+
+    def test_set_attr_int_init_free_threaded(self) -> None:
+        self.use_free_threaded_target()
+        op = SetAttr(self.r, "y", self.m, 1)
+        op.mark_as_initializer()
+        self.assert_emit(op, "CPyTagged_InitAttr(&((mod___AObject *)cpy_r_r)->_y, cpy_r_m);")
+
     def test_set_attr_non_refcounted(self) -> None:
         self.assert_emit(
             SetAttr(self.r, "x", self.b, 1),
@@ -627,6 +682,7 @@ class TestFunctionEmitterVisitor(unittest.TestCase):
         )
 
     def test_set_attr_no_error(self) -> None:
+        self.use_gil_target()
         op = SetAttr(self.r, "y", self.m, 1)
         op.error_kind = ERR_NEVER
         self.assert_emit(

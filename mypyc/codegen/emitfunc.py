@@ -12,6 +12,7 @@ from mypyc.codegen.emit import (
     TracebackAndGotoHandler,
     c_array_initializer,
 )
+from mypyc.codegen.emitwrapper import is_fastcall_supported
 from mypyc.common import (
     NATIVE_PREFIX,
     REG_PREFIX,
@@ -31,6 +32,7 @@ from mypyc.ir.ops import (
     Branch,
     Call,
     CallC,
+    CallWrapper,
     Cast,
     ComparisonOp,
     ControlOp,
@@ -460,9 +462,22 @@ class FunctionEmitterVisitor(OpVisitor[None]):
         safe by borrow_generator_attrs. The default (GIL) build always takes the plain-load
         path and increfs separately.
 
+        Non-Final 'int' attributes use CPyTagged_GetAttr on free-threaded builds, which
+        also returns a new reference (or CPY_INT_TAG if undefined). Final 'int'
+        attributes keep the plain load + incref, like CPy_GetAttrRefFinal.
+
         Thread-confined attributes also use plain loads; see
         ClassIR.attrs_are_thread_confined.
         """
+        if (
+            self.emitter.target_python.free_threaded
+            and is_int_rprimitive(attr_rtype)
+            and not op.is_borrowed
+            and not cl.attrs_are_thread_confined()
+            and not cl.is_final_attr(op.attr)
+        ):
+            self.emitter.emit_line(f"{dest} = CPyTagged_GetAttr((PyObject *){obj}, &{attr_expr});")
+            return True
         use_get_attr_ref = (
             self.emitter.target_python.free_threaded
             and is_simple_refcounted_pointer(attr_rtype)
@@ -568,11 +583,12 @@ class FunctionEmitterVisitor(OpVisitor[None]):
 
         attr_expr = self.get_attr_expr(obj, op, decl_cl)
         # On free-threaded builds this takes a new reference atomically (see
-        # emit_load_attr_take_ref). CPy_GetAttrRef returns NULL when the field is
-        # undefined, which is precisely the error value here, so the "NULL without
-        # AttributeError" behavior is preserved (this op has error_kind ERR_NEVER).
-        # is_simple_refcounted_pointer excludes tuples/vecs, so error_value_check's
-        # special cases only matter on the plain-load path (where no ref was taken).
+        # emit_load_attr_take_ref). CPy_GetAttrRef returns NULL and CPyTagged_GetAttr
+        # returns CPY_INT_TAG when the field is undefined, which is precisely the error
+        # value here, so the "error value without AttributeError" behavior is preserved
+        # (this op has error_kind ERR_NEVER). The take-ref paths exclude tuples/vecs, so
+        # error_value_check's special cases only matter on the plain-load path (where no
+        # ref was taken).
         if not self.emit_load_attr_take_ref(dest, obj, op, cl, attr_rtype, attr_expr):
             # Only emit inc_ref if not NULL
             if attr_rtype.is_refcounted and not op.is_borrowed:
@@ -642,6 +658,21 @@ class FunctionEmitterVisitor(OpVisitor[None]):
                 )
             if op.error_kind == ERR_FALSE:
                 self.emitter.emit_line(f"{dest} = 1;")
+        elif (
+            self.emitter.target_python.free_threaded
+            and is_int_rprimitive(attr_rtype)
+            and not cl.attrs_are_thread_confined()
+        ):
+            # These also steal src, and reclaim the old value if it's a long.
+            attr_expr = self.get_attr_expr(obj, op, decl_cl)
+            if op.is_init:
+                self.emitter.emit_line(f"CPyTagged_InitAttr(&{attr_expr}, {src});")
+            else:
+                self.emitter.emit_line(
+                    f"CPyTagged_SetAttr((PyObject *){obj}, &{attr_expr}, {src});"
+                )
+            if op.error_kind == ERR_FALSE:
+                self.emitter.emit_line(f"{dest} = 1;")
         else:
             # ...and struct access for normal attributes.
             attr_expr = self.get_attr_expr(obj, op, decl_cl)
@@ -705,6 +736,22 @@ class FunctionEmitterVisitor(OpVisitor[None]):
         lib = self.emitter.get_group_prefix(op.fn)
         cname = op.fn.cname(self.names)
         self.emit_line(f"{dest}{lib}{NATIVE_PREFIX}{cname}({args});")
+
+    def visit_call_wrapper(self, op: CallWrapper) -> None:
+        """Call the wrapper function of a native function."""
+        dest = self.get_dest_assign(op)
+        wrapper = self.emitter.wrapper_function_call(op.fn)
+        args = self.reg(op.args)
+        kwargs = self.reg(op.kwargs) if op.kwargs is not None else "NULL"
+        if is_fastcall_supported(op.fn, self.emitter.capi_version):
+            # The wrapper of a function or a static method doesn't take self.
+            takes_self = int(op.fn.class_name is not None and op.fn.kind != FUNC_STATICMETHOD)
+            self.emit_line(
+                f"{dest}CPy_CallFastcallWrapper({wrapper}, {takes_self}, {args}, {kwargs});"
+            )
+        else:
+            # The wrappers of __init__ and __new__ take the first argument as self.
+            self.emit_line(f"{dest}CPy_CallLegacyWrapper({wrapper}, {args}, {kwargs});")
 
     def visit_method_call(self, op: MethodCall) -> None:
         """Call native method."""
