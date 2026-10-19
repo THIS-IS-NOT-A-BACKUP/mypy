@@ -360,8 +360,8 @@ def generate_class(
     # values, we need to call it during initialization.
     defaults_fn = cl.get_method(MYPYC_DEFAULTS_SETUP)
 
-    # If there is a __init__ method, we'll use it in the native constructor.
-    init_fn = cl.get_method("__init__")
+    # If there is a native __init__ method, we'll use it in the native constructor.
+    init_fn = cl.get_native_init()
 
     # Fill out slots in the type object from dunder methods.
     fields.update(generate_slots(cl, SLOT_DEFS, emitter))
@@ -466,7 +466,7 @@ def generate_class(
         emitter.emit_line(native_function_header(cl.ctor, emitter) + ";")
 
         emit_line()
-        init_fn = cl.get_method("__init__")
+        init_fn = cl.get_native_init()
         generate_new_for_class(cl, new_name, vtable_name, setup_name, init_fn, emitter)
         emit_line()
 
@@ -956,6 +956,8 @@ def generate_init_for_class(cl: ClassIR, init_fn: FuncIR, emitter: Emitter) -> s
         or cl.builtin_base
         or cl.has_method("__new__")
         or cl.has_non_native_new()
+        # tp_new doesn't call a decorated __init__.
+        or cl.get_native_init() is None
     ):
         emitter.emit_line(
             f"return {emitter.wrapper_function_call(init_fn.decl)}"
@@ -1422,14 +1424,30 @@ def generate_getter(cl: ClassIR, attr: str, rtype: RType, emitter: Emitter) -> N
     #       values is benign.
     always_defined = cl.is_always_defined(attr) and not rtype.is_refcounted
 
+    tuple_snapshot = (
+        emitter.target_python.free_threaded
+        and isinstance(rtype, RTuple)
+        and attr not in cl.final_attributes
+    )
+    if tuple_snapshot:
+        assert isinstance(rtype, RTuple)
+        emitter.emit_line(f"{emitter.ctype(rtype)} tmp;")
+        undefined = emitter.emit_tuple_attr_load_locked("tmp", attr_expr, "self", rtype, cl, attr)
+        attr_expr = "tmp"
     if not always_defined:
-        emitter.emit_undefined_attr_check(rtype, attr_expr, "==", "self", attr, cl, unlikely=True)
+        if tuple_snapshot:
+            emitter.emit_line(f"if (unlikely({undefined})) {{")
+        else:
+            emitter.emit_undefined_attr_check(
+                rtype, attr_expr, "==", "self", attr, cl, unlikely=True
+            )
         emitter.emit_line("PyErr_SetString(PyExc_AttributeError,")
         emitter.emit_line(f'    "attribute {repr(attr)} of {repr(cl.name)} undefined");')
         emitter.emit_line("return NULL;")
         emitter.emit_line("}")
-    emitter.emit_inc_ref(f"self->{attr_field}", rtype)
-    emitter.emit_box(f"self->{attr_field}", "retval", rtype, declare_dest=True)
+    if not tuple_snapshot:
+        emitter.emit_inc_ref(attr_expr, rtype)
+    emitter.emit_box(attr_expr, "retval", rtype, declare_dest=True)
     emitter.emit_line("return retval;")
     emitter.emit_line("}")
 
@@ -1540,17 +1558,25 @@ def generate_setter(cl: ClassIR, attr: str, rtype: RType, emitter: Emitter) -> N
     # Take ownership of the incoming value before releasing the old one. In
     # particular, a failed cast must leave the attribute and its reference intact.
     emitter.emit_inc_ref("tmp", rtype)
-    emit_decref_old_value()
-    emitter.emit_line(f"self->{attr_field} = tmp;")
-    if rtype.error_overlap and not always_defined:
-        emitter.emit_attr_bitmap_set("tmp", "self", rtype, cl, attr)
+    if emitter.target_python.free_threaded and isinstance(rtype, RTuple):
+        emitter.emit_tuple_attr_store_locked("tmp", f"self->{attr_field}", "self", rtype, cl, attr)
+    else:
+        emit_decref_old_value()
+        emitter.emit_line(f"self->{attr_field} = tmp;")
+        if rtype.error_overlap and not always_defined:
+            emitter.emit_attr_bitmap_set("tmp", "self", rtype, cl, attr)
 
     if deletable:
         emitter.emit_line("} else {")
-        emit_decref_old_value()
-        emitter.set_undefined_value(f"self->{attr_field}", rtype)
-        if rtype.error_overlap:
-            emitter.emit_attr_bitmap_clear("self", rtype, cl, attr)
+        if emitter.target_python.free_threaded and isinstance(rtype, RTuple):
+            emitter.emit_tuple_attr_store_locked(
+                "", f"self->{attr_field}", "self", rtype, cl, attr, delete=True
+            )
+        else:
+            emit_decref_old_value()
+            emitter.set_undefined_value(f"self->{attr_field}", rtype)
+            if rtype.error_overlap:
+                emitter.emit_attr_bitmap_clear("self", rtype, cl, attr)
         emitter.emit_line("}")
     emitter.emit_line("return 0;")
     emitter.emit_line("}")

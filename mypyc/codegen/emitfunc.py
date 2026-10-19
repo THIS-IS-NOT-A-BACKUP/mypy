@@ -12,7 +12,6 @@ from mypyc.codegen.emit import (
     TracebackAndGotoHandler,
     c_array_initializer,
 )
-from mypyc.codegen.emitwrapper import is_fastcall_supported
 from mypyc.common import (
     NATIVE_PREFIX,
     REG_PREFIX,
@@ -32,7 +31,6 @@ from mypyc.ir.ops import (
     Branch,
     Call,
     CallC,
-    CallWrapper,
     Cast,
     ComparisonOp,
     ControlOp,
@@ -528,15 +526,30 @@ class FunctionEmitterVisitor(OpVisitor[None]):
         else:
             # Otherwise, use direct or offset struct access.
             attr_expr = self.get_attr_expr(obj, op, decl_cl)
-            use_get_attr_ref = self.emit_load_attr_take_ref(
-                dest, obj, op, cl, attr_rtype, attr_expr
-            )
+            tuple_undefined = None
+            if (
+                self.emitter.target_python.free_threaded
+                and isinstance(attr_rtype, RTuple)
+                and not cl.is_final_attr(op.attr)
+                and not cl.attrs_are_thread_confined()
+            ):
+                tuple_undefined = self.emitter.emit_tuple_attr_load_locked(
+                    dest, attr_expr, obj, attr_rtype, cl, op.attr, borrow=op.is_borrowed
+                )
+                use_get_attr_ref = True
+            else:
+                use_get_attr_ref = self.emit_load_attr_take_ref(
+                    dest, obj, op, cl, attr_rtype, attr_expr
+                )
             always_defined = cl.is_always_defined(op.attr)
             merged_branch = None
             if not always_defined:
-                self.emitter.emit_undefined_attr_check(
-                    attr_rtype, dest, "==", obj, op.attr, cl, unlikely=True
-                )
+                if tuple_undefined is not None:
+                    self.emitter.emit_line(f"if (unlikely({tuple_undefined})) {{")
+                else:
+                    self.emitter.emit_undefined_attr_check(
+                        attr_rtype, dest, "==", obj, op.attr, cl, unlikely=True
+                    )
                 branch = self.next_branch()
                 if branch is not None:
                     if (
@@ -582,6 +595,16 @@ class FunctionEmitterVisitor(OpVisitor[None]):
         attr_rtype, decl_cl = cl.attr_details(op.attr)
 
         attr_expr = self.get_attr_expr(obj, op, decl_cl)
+        if (
+            self.emitter.target_python.free_threaded
+            and isinstance(attr_rtype, RTuple)
+            and not cl.is_final_attr(op.attr)
+            and not cl.attrs_are_thread_confined()
+        ):
+            self.emitter.emit_tuple_attr_load_locked(
+                dest, attr_expr, obj, attr_rtype, cl, op.attr, borrow=op.is_borrowed
+            )
+            return
         # On free-threaded builds this takes a new reference atomically (see
         # emit_load_attr_take_ref). CPy_GetAttrRef returns NULL and CPyTagged_GetAttr
         # returns CPY_INT_TAG when the field is undefined, which is precisely the error
@@ -673,6 +696,17 @@ class FunctionEmitterVisitor(OpVisitor[None]):
                 )
             if op.error_kind == ERR_FALSE:
                 self.emitter.emit_line(f"{dest} = 1;")
+        elif (
+            self.emitter.target_python.free_threaded
+            and isinstance(attr_rtype, RTuple)
+            and not cl.attrs_are_thread_confined()
+        ):
+            attr_expr = self.get_attr_expr(obj, op, decl_cl)
+            self.emitter.emit_tuple_attr_store_locked(
+                src, attr_expr, obj, attr_rtype, cl, op.attr, is_init=op.is_init
+            )
+            if op.error_kind == ERR_FALSE:
+                self.emitter.emit_line(f"{dest} = 1;")
         else:
             # ...and struct access for normal attributes.
             attr_expr = self.get_attr_expr(obj, op, decl_cl)
@@ -736,22 +770,6 @@ class FunctionEmitterVisitor(OpVisitor[None]):
         lib = self.emitter.get_group_prefix(op.fn)
         cname = op.fn.cname(self.names)
         self.emit_line(f"{dest}{lib}{NATIVE_PREFIX}{cname}({args});")
-
-    def visit_call_wrapper(self, op: CallWrapper) -> None:
-        """Call the wrapper function of a native function."""
-        dest = self.get_dest_assign(op)
-        wrapper = self.emitter.wrapper_function_call(op.fn)
-        args = self.reg(op.args)
-        kwargs = self.reg(op.kwargs) if op.kwargs is not None else "NULL"
-        if is_fastcall_supported(op.fn, self.emitter.capi_version):
-            # The wrapper of a function or a static method doesn't take self.
-            takes_self = int(op.fn.class_name is not None and op.fn.kind != FUNC_STATICMETHOD)
-            self.emit_line(
-                f"{dest}CPy_CallFastcallWrapper({wrapper}, {takes_self}, {args}, {kwargs});"
-            )
-        else:
-            # The wrappers of __init__ and __new__ take the first argument as self.
-            self.emit_line(f"{dest}CPy_CallLegacyWrapper({wrapper}, {args}, {kwargs});")
 
     def visit_method_call(self, op: MethodCall) -> None:
         """Call native method."""
@@ -1044,6 +1062,12 @@ class FunctionEmitterVisitor(OpVisitor[None]):
         elif isinstance(op.src, LoadStatic):
             prefix = PREFIX_MAP[op.src.namespace]
             src = self.emitter.static_name(op.src.identifier, op.src.module_name, prefix)
+        elif isinstance(op.src, FuncDecl):
+            # Omit '&': a local wrapper's name evaluates to its function pointer,
+            # while a wrapper in another group is already a pointer in the exports table.
+            wrapper = self.emitter.wrapper_function_call(op.src)
+            self.emit_line(f"{dest} = ({typ._ctype}){wrapper};")
+            return
         else:
             src = op.src
         self.emit_line(f"{dest} = ({typ._ctype})&{src};")
