@@ -6866,12 +6866,11 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi, SplittingVisitor):
 
         # Restrict the type of the variable to True-ish/False-ish in the if and else branches
         # respectively
-        original_vartype = self.lookup_type(node)
+        vartype = self.lookup_type(node)
         if in_boolean_context:
             # We don't check `:=` values in expressions like `(a := A())`,
             # because they produce two error messages.
-            self.check_for_truthy_type(original_vartype, node)
-        vartype = try_expanding_sum_type_to_union(original_vartype, "builtins.bool")
+            self.check_for_truthy_type(vartype, node)
 
         if_map = {node: true_only(vartype)}
         else_map = {node: false_only(vartype)}
@@ -6989,16 +6988,6 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi, SplittingVisitor):
                         all_if_maps = []
                         all_else_maps = []
                         for known_item in container_item_types:
-                            # Match the should_coerce_literals logic from narrow_type_by_identity_equality
-                            p_known_item = get_proper_type(known_item)
-                            if (
-                                is_literal_type_like(p_known_item)
-                                or (
-                                    isinstance(p_known_item, Instance)
-                                    and p_known_item.type.is_enum
-                                )
-                            ) and not has_custom_eq_checks(p_known_item):
-                                known_item = coerce_to_literal(known_item)
                             if_map, else_map = self.narrow_type_by_identity_equality(
                                 "==",
                                 operands=[operands[left_index], operands[right_index]],
@@ -7007,8 +6996,7 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi, SplittingVisitor):
                                 narrowable_indices={0},
                             )
                             all_if_maps.append(if_map)
-                            if is_singleton_equality_type(get_proper_type(known_item)):
-                                all_else_maps.append(else_map)
+                            all_else_maps.append(else_map)
                         if_map = reduce_or_conditional_type_maps(all_if_maps)
                         else_map = reduce_and_conditional_type_maps(all_else_maps, use_meet=True)
                     else:
@@ -7168,9 +7156,7 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi, SplittingVisitor):
                 if narrowable_expr_type is None:
                     if_type = else_type = ambiguous_expr_type
                 else:
-                    narrowable_expr_type = try_expanding_sum_type_to_union(
-                        coerce_to_literal(narrowable_expr_type), None
-                    )
+                    narrowable_expr_type = coerce_to_literal(narrowable_expr_type)
                     if_type, else_type = conditional_types(
                         narrowable_expr_type,
                         [TypeRange(target_type, is_upper_bound=False)],
@@ -7247,7 +7233,7 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi, SplittingVisitor):
                     # we narrow to in the if_map
                     or_if_maps.append({operands[i]: expr_type})
 
-                expr_type = coerce_to_literal(try_expanding_sum_type_to_union(expr_type, None))
+                expr_type = coerce_to_literal(expr_type)
                 for j in expr_indices:
                     if j in custom_eq_indices:
                         if i == j:
@@ -7273,9 +7259,6 @@ class TypeChecker(NodeVisitor[None], TypeCheckerSharedApi, SplittingVisitor):
                     if narrowable_expr_type is None:
                         if_type = else_type = ambiguous_expr_type
                     else:
-                        narrowable_expr_type = coerce_to_literal(
-                            try_expanding_sum_type_to_union(narrowable_expr_type, None)
-                        )
                         if_type, else_type = conditional_types(
                             narrowable_expr_type,
                             [TypeRange(target_type, is_upper_bound=False)],
@@ -9081,7 +9064,10 @@ def and_conditional_maps(m1: TypeMap, m2: TypeMap, *, use_meet: bool = False) ->
             result[e1] = m1[e1]
             continue
 
-        if not use_meet:
+        if use_meet:
+            e2 = m2_exprs[e1_hash]
+            result[e1] = meet_types(m1[e1], m2[e2])
+        else:
             # If use_meet=False and the same expression's type is refined by both conditions,
             # we somewhat arbitrarily give precedence to m2, unless a) m1's value is Never, or
             # b) m2's value is Any and m1 isn't a union that could have been narrowed to Any.
@@ -9098,14 +9084,6 @@ def and_conditional_maps(m1: TypeMap, m2: TypeMap, *, use_meet: bool = False) ->
                 ):
                     result[e1] = t1
 
-    if use_meet:
-        # For now, meet common keys only if specifically requested.
-        # This is currently used for tuple types narrowing, where having
-        # a precise result is important.
-        for e1 in m1:
-            for e2 in m2:
-                if literal_hash(e1) == literal_hash(e2):
-                    result[e1] = meet_types(m1[e1], m2[e2])
     return result
 
 

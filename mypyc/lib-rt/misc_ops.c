@@ -230,6 +230,8 @@ PyObject *CPyType_FromTemplate(PyObject *template,
 
     if (orig_bases) {
         bases = update_bases(orig_bases);
+        if (bases == NULL)
+            goto error;
         // update_bases doesn't increment the refcount if nothing changes,
         // so we do it to make sure we have distinct "references" to both
         if (bases == orig_bases)
@@ -252,17 +254,6 @@ PyObject *CPyType_FromTemplate(PyObject *template,
     if (!name)
         goto error;
 
-    if (template_->tp_doc) {
-        // cpython expects tp_doc to be heap-allocated so convert it here to
-        // avoid segfaults on deallocation.
-        Py_ssize_t size = strlen(template_->tp_doc) + 1;
-        char *doc = (char *)PyMem_Malloc(size);
-        if (!doc)
-            goto error;
-        memcpy(doc, template_->tp_doc, size);
-        template_->tp_doc = doc;
-    }
-
     // Allocate the type and then copy the main stuff in.
     t = (PyHeapTypeObject*)PyType_GenericAlloc(&PyType_Type, 0);
     if (!t)
@@ -270,6 +261,21 @@ PyObject *CPyType_FromTemplate(PyObject *template,
     memcpy((char *)t + sizeof(PyVarObject),
            (char *)template_ + sizeof(PyVarObject),
            sizeof(PyTypeObject) - sizeof(PyVarObject));
+
+    t->ht_type.tp_doc = NULL;
+    // Unlike the tp_doc slots of most other object, a heap type's tp_doc
+    // must be heap allocated.
+    if (template_->tp_doc) {
+        // Silently truncate the docstring if it contains a null byte
+        size_t size = strlen(template_->tp_doc) + 1;
+        char *doc = (char *)PyMem_Malloc(size);
+        if (doc == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
+        memcpy(doc, template_->tp_doc, size);
+        t->ht_type.tp_doc = doc;
+    }
 
     if (bases != orig_bases) {
         if (PyObject_SetAttr((PyObject *)t, mypyc_interned_str.__orig_bases__, orig_bases) < 0)
@@ -332,21 +338,6 @@ PyObject *CPyType_FromTemplate(PyObject *template,
         goto error;
 
     Py_XDECREF(dummy_class);
-
-    // Unlike the tp_doc slots of most other object, a heap type's tp_doc
-    // must be heap allocated.
-    if (template_->tp_doc) {
-        // Silently truncate the docstring if it contains a null byte
-        Py_ssize_t size = strlen(template_->tp_doc) + 1;
-        char *tp_doc = (char *)PyMem_Malloc(size);
-        if (tp_doc == NULL) {
-            PyErr_NoMemory();
-            goto error;
-        }
-
-        memcpy(tp_doc, template_->tp_doc, size);
-        t->ht_type.tp_doc = tp_doc;
-    }
 
 #if PY_MINOR_VERSION == 11
     // This is a hack. Python 3.11 doesn't include good public APIs to work with managed
@@ -950,8 +941,9 @@ PyObject *CPySingledispatch_RegisterFunction(PyObject *singledispatch_func,
     PyObject *typing = NULL;
     PyObject *get_type_hints = NULL;
     PyObject *type_hints = NULL;
+    PyObject *result = NULL;
 
-    if (registry == NULL) goto fail;
+    if (registry == NULL) goto done;
     if (func == NULL) {
         // one argument case
         if (PyType_Check(cls)) {
@@ -959,8 +951,9 @@ PyObject *CPySingledispatch_RegisterFunction(PyObject *singledispatch_func,
             // bind cls to the first argument so that register gets called again with both the
             // class and the function
             register_func = PyObject_GetAttr(singledispatch_func, mypyc_interned_str.register_);
-            if (register_func == NULL) goto fail;
-            return PyMethod_New(register_func, cls);
+            if (register_func == NULL) goto done;
+            result = PyMethod_New(register_func, cls);
+            goto done;
         }
         // passed a function
         PyObject *annotations = PyFunction_GetAnnotations(cls);
@@ -971,49 +964,49 @@ PyObject *CPySingledispatch_RegisterFunction(PyObject *singledispatch_func,
 
         if (annotations == NULL) {
             PyErr_Format(PyExc_TypeError, invalid_first_arg_msg, cls);
-            goto fail;
+            goto done;
         }
-
-        Py_INCREF(annotations);
 
         func = cls;
         typing = PyImport_ImportModule("typing");
-        if (typing == NULL) goto fail;
+        if (typing == NULL) goto done;
         get_type_hints = PyObject_GetAttr(typing, mypyc_interned_str.get_type_hints);
 
+        if (get_type_hints == NULL) goto done;
         type_hints = PyObject_CallOneArg(get_type_hints, func);
+        if (type_hints == NULL) goto done;
         PyObject *argname;
         Py_ssize_t pos = 0;
         if (!PyDict_Next(type_hints, &pos, &argname, &cls)) {
             // the functools implementation raises the same type error if annotations is an empty dict
             PyErr_Format(PyExc_TypeError, invalid_first_arg_msg, cls);
-            goto fail;
+            goto done;
         }
         if (!PyType_Check(cls)) {
             const char *invalid_annotation_msg = "Invalid annotation for %R. %R is not a class.";
             PyErr_Format(PyExc_TypeError, invalid_annotation_msg, argname, cls);
-            goto fail;
+            goto done;
         }
     }
     if (PyDict_SetItem(registry, cls, func) == -1) {
-        goto fail;
+        goto done;
     }
 
     // clear the cache so we consider the newly added function when dispatching
     PyObject *dispatch_cache = PyObject_GetAttr(singledispatch_func, mypyc_interned_str.dispatch_cache);
-    if (dispatch_cache == NULL) goto fail;
+    if (dispatch_cache == NULL) goto done;
     PyDict_Clear(dispatch_cache);
+    Py_DECREF(dispatch_cache);
 
-    Py_INCREF(func);
-    return func;
+    result = Py_NewRef(func);
 
-fail:
+done:
     Py_XDECREF(registry);
     Py_XDECREF(register_func);
     Py_XDECREF(typing);
     Py_XDECREF(get_type_hints);
     Py_XDECREF(type_hints);
-    return NULL;
+    return result;
 
 }
 
