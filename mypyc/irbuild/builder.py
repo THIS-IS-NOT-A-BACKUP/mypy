@@ -250,7 +250,9 @@ class IRBuilder:
         self.classes: list[ClassIR] = []
         self.final_names: list[tuple[str, RType]] = []
         self.type_var_names: list[str] = []
-        self.callable_class_names: set[str] = set()
+        # Names of generated classes (callable and environment classes), used to
+        # keep the names unique within the module
+        self.generated_class_names: set[str] = set()
         self.options = options
 
         # Keep track of the number of lambdas instantiated so we avoid name conflicts.
@@ -317,6 +319,27 @@ class IRBuilder:
         self.globals_lookup_module: str | None = None
 
     # High-level control
+
+    def unique_class_name(self, base_name: str) -> str:
+        """Return a unique name for a generated class, based on base_name.
+
+        We allow multiple definitions of a nested function with the same name,
+        since this is valid in if-else blocks. Example:
+
+            if True:
+                def foo():          ---->    foo_obj()
+                    return True
+            else:
+                def foo():          ---->    foo_obj_0()
+                    return False
+        """
+        name = base_name
+        count = 0
+        while name in self.generated_class_names:
+            name = f"{base_name}_{count}"
+            count += 1
+        self.generated_class_names.add(name)
+        return name
 
     def set_module(self, module_name: str, module_path: str) -> None:
         """Set the name and path of the current module.
@@ -1033,8 +1056,11 @@ class IRBuilder:
         # This may be the whole lvalue list if there is no starred value
         split_idx = target.star_idx if target.star_idx is not None else len(target.items)
 
-        # Assign values before the first starred value
-        for litem in target.items[:split_idx]:
+        # Get all the values before assigning anything, to match Python evaluation order
+        values = []
+
+        # Get values before the first starred value
+        for _ in range(split_idx):
             ritem = self.call_c(next_op, [iterator], line)
             error_block, ok_block = BasicBlock(), BasicBlock()
             self.add(Branch(ritem, error_block, ok_block, Branch.IS_ERROR))
@@ -1049,9 +1075,9 @@ class IRBuilder:
 
             self.activate_block(ok_block)
 
-            self.assign(litem, ritem, line)
+            values.append(ritem)
 
-        # Assign the starred value and all values after it
+        # Get the starred value and all values after it
         if target.star_idx is not None:
             post_star_vals = target.items[split_idx + 1 :]
             iter_list = self.primitive_op(to_list, [iterator], line)
@@ -1072,12 +1098,11 @@ class IRBuilder:
 
             self.activate_block(ok_block)
 
-            for litem in reversed(post_star_vals):
-                ritem = self.primitive_op(list_pop_last, [iter_list], line)
-                self.assign(litem, ritem, line)
-
-            # Assign the starred value
-            self.assign(target.items[target.star_idx], iter_list, line)
+            post_star_values = [
+                self.primitive_op(list_pop_last, [iter_list], line) for _ in post_star_vals
+            ]
+            values.append(iter_list)
+            values.extend(reversed(post_star_values))
 
         # There is no starred value, so check if there are extra values in rhs that
         # have not been assigned.
@@ -1095,6 +1120,9 @@ class IRBuilder:
             self.add(Unreachable())
 
             self.activate_block(ok_block)
+
+        for litem, ritem in zip(target.items, values):
+            self.assign(litem, ritem, line)
 
     def push_loop_stack(self, continue_block: BasicBlock, break_block: BasicBlock) -> None:
         self.nonlocal_control.append(
