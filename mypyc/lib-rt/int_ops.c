@@ -126,6 +126,17 @@ CPyTagged CPyTagged_Negate_(CPyTagged num) {
     return CPyTagged_StealFromObject(result);
 }
 
+// Tagged int absolute value slow path, where the result may be a long integer
+CPyTagged CPyTagged_Absolute_(CPyTagged num) {
+    PyObject *num_obj = CPyTagged_AsObject(num);
+    PyObject *result = PyNumber_Absolute(num_obj);
+    if (result == NULL) {
+        CPyError_OutOfMemory();
+    }
+    Py_DECREF(num_obj);
+    return CPyTagged_StealFromObject(result);
+}
+
 // Tagged int addition slow path, where the result may be a long integer
 CPyTagged CPyTagged_Add_(CPyTagged left, CPyTagged right) {
     PyObject *left_obj = CPyTagged_AsObject(left);
@@ -556,6 +567,29 @@ int16_t CPyInt16_Remainder(int16_t x, int16_t y) {
 
 void CPyInt16_Overflow() {
     PyErr_SetString(PyExc_ValueError, "int too large to convert to i16");
+}
+
+// u16 unboxing slow path
+uint16_t CPyLong_AsUInt16_(PyObject *o) {
+    int overflow;
+    long result = PyLong_AsLongAndOverflow(o, &overflow);
+    if (result < 0 || result >= 65536) {
+        overflow = 1;
+        result = -1;
+    }
+    if (result == -1) {
+        if (PyErr_Occurred()) {
+            return CPY_LL_UINT_ERROR;
+        } else if (overflow) {
+            PyErr_SetString(PyExc_ValueError, "int too large or small to convert to u16");
+            return CPY_LL_UINT_ERROR;
+        }
+    }
+    return result;
+}
+
+void CPyUInt16_Overflow() {
+    PyErr_SetString(PyExc_ValueError, "int too large or small to convert to u16");
 }
 
 // u8 unboxing slow path
